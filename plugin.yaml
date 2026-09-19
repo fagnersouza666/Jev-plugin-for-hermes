@@ -1,0 +1,38 @@
+name: jev-plugin-for-hermes
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+kind: standalone
+description: "TypeSafe Jev decision primitives exposed as Hermes tools and a namespaced skill."
+author: Fagner Souza
+license: MIT
+tags:
+  - decision
+  - classification
+  - typesafe
+  - jev
+requires_env:
+  - name: TYPESAFE_API_KEY
+    description: "API key for the TypeSafe Jev API"
+    url: "https://console.typesafe.ai"
+    secret: true
+provides_tools:
+  - jev_evaluate
+  - jev_price_assess
+config_schema:
+  api_url:
+    type: str
+    default: "https://api.typesafe.ai/v1/systemone"
+    description: "TypeSafe System One endpoint"
+  default_model:
+    type: str
+    default: "jev-latest"
+    description: "Jev model alias or pinned version"
+  timeout_seconds:
+    type: float
+    default: 30.0
+    description: "Per-request timeout"
+  max_state_chars:
+    type: int
+    default: 20000
+    description: "Maximum serialized state size sent to Jev"
