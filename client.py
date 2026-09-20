@@ -19,8 +19,13 @@ from urllib.request import Request, urlopen
 DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 DEFAULT_API_KEY_ENV = "TYPESAFE_API_KEY"
+PLUGIN_VERSION = "0.1.0"
 _QUESTION_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _ALLOWED_TYPES = {"noul", "choice", "score"}
+_TIMEOUT_MIN = 1.0
+_TIMEOUT_MAX = 600.0
+_STATE_CHARS_MIN = 256
+_STATE_CHARS_MAX = 200_000
 
 
 class JevError(Exception):
@@ -49,6 +54,48 @@ class JevHTTPError(JevError):
 
 class JevProtocolError(JevError):
     """The API response was not valid JSON in the expected shape."""
+
+
+@dataclass(frozen=True)
+class PluginSettings:
+    """Resolved Hermes plugin settings with defaults and clamps applied once."""
+
+    api_url: str = DEFAULT_ENDPOINT
+    default_model: str = DEFAULT_MODEL
+    timeout_seconds: float = 30.0
+    max_state_chars: int = 20_000
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any] | None = None) -> PluginSettings:
+        data = mapping or {}
+        try:
+            timeout = float(data.get("timeout_seconds", 30.0))
+            max_state_chars = int(data.get("max_state_chars", 20_000))
+        except (TypeError, ValueError) as exc:
+            raise JevConfigurationError("plugin settings timeout_seconds and max_state_chars must be numeric") from exc
+
+        api_url = data.get("api_url", DEFAULT_ENDPOINT)
+        default_model = data.get("default_model", DEFAULT_MODEL)
+        if not isinstance(api_url, str) or not isinstance(default_model, str):
+            raise JevConfigurationError("plugin settings api_url and default_model must be strings")
+
+        return cls(
+            api_url=api_url,
+            default_model=default_model,
+            timeout_seconds=max(_TIMEOUT_MIN, min(timeout, _TIMEOUT_MAX)),
+            max_state_chars=max(_STATE_CHARS_MIN, min(max_state_chars, _STATE_CHARS_MAX)),
+        )
+
+    @classmethod
+    def from_ctx(cls, ctx: Any) -> PluginSettings:
+        return cls.from_mapping(
+            {
+                "api_url": ctx.get_config("api_url", DEFAULT_ENDPOINT),
+                "default_model": ctx.get_config("default_model", DEFAULT_MODEL),
+                "timeout_seconds": ctx.get_config("timeout_seconds", 30.0),
+                "max_state_chars": ctx.get_config("max_state_chars", 20_000),
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -81,6 +128,27 @@ def _serialized_state(state: Any, max_chars: int) -> str:
     return text
 
 
+def _validate_choice_criteria(question: dict[str, Any], name: str) -> dict[str, str]:
+    criteria = question.get("criteria")
+    if not isinstance(criteria, Mapping) or len(criteria) < 1:
+        raise JevValidationError(f"choice question {name!r} needs a non-empty criteria object")
+    if any(
+        not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+        for k, v in criteria.items()
+    ):
+        raise JevValidationError(f"choice question {name!r} criteria must map strings to descriptions")
+    return dict(criteria)
+
+
+def _validate_score_criteria(question: dict[str, Any], name: str) -> list[str]:
+    criteria = question.get("criteria")
+    if not isinstance(criteria, list) or len(criteria) < 2 or any(
+        not isinstance(item, str) or not item.strip() for item in criteria
+    ):
+        raise JevValidationError(f"score question {name!r} needs at least two non-empty criteria")
+    return [item.strip() for item in criteria]
+
+
 def _validate_question(name: str, raw: Any) -> dict[str, Any]:
     if not _QUESTION_NAME.fullmatch(name):
         raise JevValidationError(f"invalid question name: {name!r}")
@@ -99,20 +167,9 @@ def _validate_question(name: str, raw: Any) -> dict[str, Any]:
     question["instructions"] = instructions.strip()
 
     if question["type"] == "choice":
-        criteria = question.get("criteria")
-        if not isinstance(criteria, Mapping) or len(criteria) < 1:
-            raise JevValidationError(f"choice question {name!r} needs a non-empty criteria object")
-        if any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
-               for k, v in criteria.items()):
-            raise JevValidationError(f"choice question {name!r} criteria must map strings to descriptions")
-        question["criteria"] = dict(criteria)
+        question["criteria"] = _validate_choice_criteria(question, name)
     elif question["type"] == "score":
-        criteria = question.get("criteria")
-        if not isinstance(criteria, list) or len(criteria) < 2 or any(
-            not isinstance(item, str) or not item.strip() for item in criteria
-        ):
-            raise JevValidationError(f"score question {name!r} needs at least two non-empty criteria")
-        question["criteria"] = [item.strip() for item in criteria]
+        question["criteria"] = _validate_score_criteria(question, name)
 
     return question
 
@@ -149,6 +206,56 @@ def _validate_endpoint(endpoint: str) -> str:
     return endpoint.strip()
 
 
+def _clamp_timeout(timeout: float) -> float:
+    return max(_TIMEOUT_MIN, min(float(timeout), _TIMEOUT_MAX))
+
+
+def _clamp_max_state_chars(max_state_chars: int) -> int:
+    return max(_STATE_CHARS_MIN, min(int(max_state_chars), _STATE_CHARS_MAX))
+
+
+def _post_json(
+    opener: Callable[..., Any],
+    *,
+    endpoint: str,
+    timeout: float,
+    body: bytes,
+    api_key: str,
+) -> tuple[int, bytes]:
+    http_request = Request(
+        endpoint,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": f"jev-plugin-for-hermes/{PLUGIN_VERSION}",
+        },
+    )
+    try:
+        with opener(http_request, timeout=timeout) as response:
+            status = int(getattr(response, "status", response.getcode()))
+            raw = response.read()
+    except HTTPError as exc:
+        raise JevHTTPError(int(exc.code)) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise JevTransportError("could not reach the Jev API") from exc
+    return status, raw
+
+
+def _parse_answers(raw: bytes, status: int) -> dict[str, Any]:
+    if status < 200 or status >= 300:
+        raise JevHTTPError(status)
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise JevProtocolError("Jev API returned invalid JSON") from exc
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("answers"), dict):
+        raise JevProtocolError("Jev API response did not contain an answers object")
+    return decoded
+
+
 class JevClient:
     """Synchronous Jev client with injectable transport for deterministic tests."""
 
@@ -166,11 +273,27 @@ class JevClient:
         self.api_key_env = api_key_env
         self.endpoint = _validate_endpoint(endpoint)
         try:
-            self.timeout = max(1.0, min(float(timeout), 600.0))
-            self.max_state_chars = max(256, min(int(max_state_chars), 200_000))
+            self.timeout = _clamp_timeout(timeout)
+            self.max_state_chars = _clamp_max_state_chars(max_state_chars)
         except (TypeError, ValueError) as exc:
             raise JevConfigurationError("timeout and max_state_chars must be numeric") from exc
         self._opener = opener or urlopen
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: PluginSettings,
+        *,
+        api_key: str | None = None,
+        opener: Callable[..., Any] | None = None,
+    ) -> JevClient:
+        return cls(
+            api_key=api_key,
+            endpoint=settings.api_url,
+            timeout=settings.timeout_seconds,
+            max_state_chars=settings.max_state_chars,
+            opener=opener,
+        )
 
     def _resolved_key(self) -> str:
         key = self._api_key if self._api_key is not None else os.getenv(self.api_key_env)
@@ -187,33 +310,11 @@ class JevClient:
     ) -> dict[str, Any]:
         request = build_request(state, questions, model, self.max_state_chars)
         body = json.dumps(request.as_payload(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        http_request = Request(
-            self.endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self._resolved_key()}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "jev-plugin-for-hermes/0.1.0",
-            },
+        status, raw = _post_json(
+            self._opener,
+            endpoint=self.endpoint,
+            timeout=self.timeout,
+            body=body,
+            api_key=self._resolved_key(),
         )
-
-        try:
-            with self._opener(http_request, timeout=self.timeout) as response:
-                status = int(getattr(response, "status", response.getcode()))
-                raw = response.read()
-        except HTTPError as exc:
-            raise JevHTTPError(int(exc.code)) from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            raise JevTransportError("could not reach the Jev API") from exc
-
-        if status < 200 or status >= 300:
-            raise JevHTTPError(status)
-        try:
-            decoded = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise JevProtocolError("Jev API returned invalid JSON") from exc
-        if not isinstance(decoded, dict) or not isinstance(decoded.get("answers"), dict):
-            raise JevProtocolError("Jev API response did not contain an answers object")
-        return decoded
+        return _parse_answers(raw, status)
