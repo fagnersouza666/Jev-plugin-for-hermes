@@ -23,7 +23,7 @@ _QUESTION = {
         },
     },
     "required": ["type", "instructions"],
-    "additionalProperties": True,
+    "additionalProperties": False,
 }
 
 JEV_EVALUATE = {
