@@ -1,104 +1,276 @@
 # jev-plugin-for-hermes
 
-Standalone Hermes Agent plugin that exposes TypeSafe Jev (System One) as typed
-decision tools and a namespaced skill.
+Standalone [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin
+that exposes [TypeSafe Jev](https://console.typesafe.ai) (System One) as typed
+decision tools, a namespaced skill, a `/jev` command, and a `pre_tool_call`
+guard.
 
-The plugin evaluates supplied evidence and returns `{ "ok": true, ... }` or
-`{ "ok": false, "error": ... }`. It does not buy, alert, publish, delete, or
-authorize anything.
+The plugin evaluates evidence you already have and returns
+`{ "ok": true, ... }` or `{ "ok": false, "error": ... }`. It does not buy,
+alert, publish, delete, or authorize anything.
 
-The first intended consumer is a price-monitor pipeline. Numeric policy, identity
-checks, freshness, seller allowlists, alerting, and human review stay **outside**
-this plugin.
-
-Contributor working notes live in [`AGENTS.md`](AGENTS.md). The runtime
-playbook for calling Jev from Hermes is
+Contributor notes: [`AGENTS.md`](AGENTS.md). Runtime playbook for the agent:
 [`skills/jev-playbook/SKILL.md`](skills/jev-playbook/SKILL.md)
 (`jev-plugin-for-hermes:jev-playbook`).
 
-## Surfaces
+## What it is for
 
-| Surface | Name | Purpose |
+Use this plugin when a Hermes session needs a **typed judgment over supplied
+evidence**, not when it needs to fetch data or take a side effect.
+
+Typical jobs:
+
+- Classify or score a product listing (exact match, condition, seller quality,
+  deal quality).
+- Ask a yes/no-style probability (`noul`), pick one named category (`choice`),
+  or place an item on an ordered rubric (`score`).
+- Smoke-test a Jev payload from the session with `/jev`.
+- Once the plugin is enabled, assess **every** Hermes tool call before it
+  runs, so a `review` / `deny` from Jev can block the call. That assessment
+  is evidence for Hermes' normal policy, not a replacement for it.
+
+The first intended consumer is a price-monitor pipeline. Numeric thresholds,
+identity checks, freshness, seller allowlists, alerting, and human review stay
+**outside** this plugin. Treat Jev output as input to those checks.
+
+This repo is a third-party native plugin (`plugin.yaml` + `register(ctx)`). It
+is not part of `NousResearch/hermes-agent` and must not be merged into that
+tree.
+
+## How it works in Hermes Agent
+
+Hermes discovers user plugins under `~/.hermes/plugins/`. A plugin is **opt-in**:
+discovery can see the directory, but tools and hooks load only after the name
+is on `plugins.enabled` in `~/.hermes/config.yaml`.
+
+On load, Hermes reads `plugin.yaml` and calls `register(ctx)` in `__init__.py`.
+That function registers these surfaces:
+
+| Surface | Name | What the agent sees |
 |---|---|---|
 | Tool | `jev_evaluate` | Generic `noul` / `choice` / `score` questions |
-| Tool | `jev_price_assess` | Convenience adapter for a product offer |
-| Hook | `pre_tool_call` | Assess every Hermes tool call before execution |
+| Tool | `jev_price_assess` | Fixed question set for a product offer |
+| Hook | `pre_tool_call` | Assesses every Hermes tool call before execution |
 | Skill | `jev-playbook` | Routing and safe-interpretation playbook |
-| Command | `/jev <json>` | Manual inspection / smoke test |
-
-The `pre_tool_call` hook sends a bounded, sanitized preview of every tool name and
-argument object to Jev. `allow` with reason code `no_issue` leaves Hermes' normal
-policy and approval path unchanged. `review` and `deny` block the call before
-execution; contradictory pairs such as `allow` + `destructive_change` are treated
-as malformed decisions and blocked fail-closed. This preserves Hermes' normal
-approval and hook ordering, and Jev never gets unilateral authority to execute or
-authorize a side effect. If the assessment cannot be completed, the tool call is
-blocked fail-closed.
-
-For a non-`allow` result, the hook also requests one bounded reason code (for
-example `insufficient_context` or `deployment_or_release`) and includes that
-code and its fixed local description in the blocking message. This is diagnostic
-context only; it does not turn Jev into an authorization or bypass mechanism.
-
-The Hermes hook does **not** read the filesystem. Codex integration (session
-router, PreToolUse adapter, named profiles) lives in a separate project,
-[`jev-for-codex`](../jev-for-codex).
-
-This is intentionally an opt-in cost and privacy trade-off: each tool call adds a
-synchronous HTTPS round trip and sends the sanitized preview to the configured
-TypeSafe endpoint. Common credential fields and inline token patterns are redacted,
-but the preview is still derived from tool arguments; do not enable this mode for
-sensitive data without accepting that boundary.
+| Command | `/jev <json>` | In-session inspection / smoke test |
 
 At runtime Hermes namespaces tools and the skill as
-`jev-plugin-for-hermes:<name>`.
+`jev-plugin-for-hermes:<name>`. Do not hardcode a different plugin id.
 
-There are no import-time network calls, no credential persistence, and no
-irreversible actions. Network calls happen only when a tool or `/jev` runs, or when
-the `pre_tool_call` hook assesses a tool invocation.
+### Session flow
+
+1. You start Hermes (CLI, gateway, or desktop). The plugin manager imports this
+   directory only if `jev-plugin-for-hermes` is enabled and
+   `TYPESAFE_API_KEY` is present.
+2. `register(ctx)` builds one `JevClient` from plugin settings and wires the
+   two tools, the skill, `/jev`, and the hook.
+3. When the model calls `jev-plugin-for-hermes:jev_evaluate` or
+   `jev-plugin-for-hermes:jev_price_assess`, the handler validates the
+   arguments, POSTs JSON to the configured TypeSafe endpoint over HTTPS, and
+   returns allowlisted fields inside `{ "ok": true, ... }`.
+4. Before **any** Hermes tool runs (not only Jev tools), `pre_tool_call` sends
+   a bounded, sanitized preview of the tool name and arguments to Jev.
+   `allow` with reason code `no_issue` leaves Hermes' normal approval path
+   unchanged. `review`, `deny`, provider failures, and contradictory decisions
+   (for example `allow` + `destructive_change`) block the call fail-closed.
+5. `/jev` reuses the evaluate handler. Empty or invalid JSON returns a usage
+   error and does not call the API.
+
+There are no import-time network calls, no credential persistence in this
+repo, and no irreversible actions. Network happens only when a tool, `/jev`,
+or the hook runs. Each of those is one outbound HTTPS POST.
+
+The hook is an opt-in cost and privacy trade-off: every tool call adds a
+synchronous round trip and sends a redacted preview to TypeSafe. Common
+credential fields and inline token patterns are stripped, but the preview is
+still derived from tool arguments.
+
+Jev never gets unilateral authority to execute a side effect. A non-`allow`
+result includes one bounded reason code (for example `insufficient_context`)
+for diagnostics only.
+
+The Hermes hook does **not** read the filesystem. Codex session routing lives
+in a separate project, [`jev-for-codex`](../jev-for-codex).
 
 ## Requirements
 
-- Hermes Agent with the native plugin system
-- Python 3.11+ (runtime uses the standard library only; no TypeSafe SDK, `httpx`, or `requests`)
-- A TypeSafe API key in `TYPESAFE_API_KEY` when the plugin is enabled
+- Hermes Agent with the native plugin system (`hermes` on your `PATH`)
+- Python 3.11+ (the plugin uses the standard library only: no TypeSafe SDK,
+  `httpx`, or `requests`)
+- A TypeSafe API key in `TYPESAFE_API_KEY`
   ([TypeSafe console](https://console.typesafe.ai))
 
-## Local installation
+## Install in Hermes (step by step)
 
-Keep this repository as the source of truth and link it into the Hermes home:
+Keep this repository as the source of truth. Linking it into the Hermes home
+means edits here are what the agent loads. Do not copy files into
+`~/.hermes/skills/` (collision risk); the skill is registered from this tree.
+
+### 1. Confirm Hermes is installed
+
+```bash
+hermes --version
+```
+
+If that fails, install Hermes Agent first from
+[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent).
+
+### 2. Get a TypeSafe API key
+
+1. Open [https://console.typesafe.ai](https://console.typesafe.ai).
+2. Create or copy an API key.
+3. Keep it out of git, prompts, and this repository.
+
+### 3. Get this plugin onto disk
+
+Clone (or use an existing checkout):
+
+```bash
+git clone https://github.com/fagnersouza666/Jev-plugin-for-hermes.git
+cd Jev-plugin-for-hermes
+```
+
+The directory name on GitHub can differ from the plugin id. The id Hermes
+uses is the `name` in `plugin.yaml`: `jev-plugin-for-hermes`.
+
+### 4. Link the checkout into the Hermes plugin directory
 
 ```bash
 mkdir -p "$HOME/.hermes/plugins"
 ln -sfn "$PWD" "$HOME/.hermes/plugins/jev-plugin-for-hermes"
+```
+
+`$PWD` must be the plugin root (the folder that contains `plugin.yaml` and
+`__init__.py`). The symlink name must be `jev-plugin-for-hermes`.
+
+Alternative if you prefer Hermes to clone the repo itself:
+
+```bash
+hermes plugins install https://github.com/fagnersouza666/Jev-plugin-for-hermes.git --enable
+```
+
+That path is a copy under `~/.hermes/plugins/`, not a live link to this
+working tree. Use the symlink when you are developing the plugin.
+
+This plugin is not in the official Hermes catalog, so a bare
+`hermes plugins install jev-plugin-for-hermes` will not resolve it.
+
+### 5. Enable the plugin
+
+User plugins stay disabled until you allow them:
+
+```bash
 hermes plugins enable jev-plugin-for-hermes
+```
+
+You can also toggle plugins interactively with `hermes plugins`, or add the
+id under `plugins.enabled` in `~/.hermes/config.yaml`.
+
+Enabling the plugin also registers `pre_tool_call`. After that, every Hermes
+tool invocation is assessed (one HTTPS POST per call) until you disable the
+plugin.
+
+If the plugin is enabled without a key, Hermes should gate it as missing its
+declared environment requirement.
+
+### 6. Store the API key in Hermes
+
+```bash
 hermes config set TYPESAFE_API_KEY
 ```
 
-Do not commit `.env`, keys, or a real API URL with credentials. If the plugin is
-enabled without a key, Hermes should gate it as missing its declared environment
-requirement.
+Enter the key when prompted. `UPPER_SNAKE` names go to `~/.hermes/.env`, not
+`config.yaml`. Do not put the key in this repo, in `plugin.yaml`, or in a
+prompt.
 
-## Plugin settings
+### 7. Optional: pin settings
 
-Settings live under `plugins.entries.jev-plugin-for-hermes.settings` in Hermes
-`config.yaml`. They are resolved once at registration through `PluginSettings`
-in `client.py` (not from a repo `.env`):
+Settings live under `plugins.entries.jev-plugin-for-hermes.settings` in
+`~/.hermes/config.yaml`. They are resolved once at registration through
+`PluginSettings` in `client.py` (not from a repo `.env`).
+
+Example:
+
+```yaml
+plugins:
+  enabled:
+    - jev-plugin-for-hermes
+  entries:
+    jev-plugin-for-hermes:
+      settings:
+        api_url: https://api.typesafe.ai/v1/systemone
+        default_model: jev-latest
+        timeout_seconds: 30.0
+        max_state_chars: 20000
+```
 
 | Setting | Default | Notes |
 |---|---|---|
-| `api_url` | `https://api.typesafe.ai/v1/systemone` | Operator trust boundary: Bearer POSTs to this host (HTTPS only, except loopback for local tests). Tool arguments cannot change it. |
+| `api_url` | `https://api.typesafe.ai/v1/systemone` | Operator trust boundary: Bearer POSTs go to this host (HTTPS only, except loopback for local tests). Tool arguments cannot change it. |
 | `default_model` | `jev-latest` | Pin a tested version (for example `jev-1.13.0`) after calibration |
 | `timeout_seconds` | `30.0` | Clamped once to 1–600 for tools and `/jev`; the `pre_tool_call` hook uses `min(timeout_seconds, 25)` so the Jev call finishes before Hermes' default 30s hook callback timeout |
 | `max_state_chars` | `20000` | Clamped once to 256–200000 |
 
 Handlers share one `JevClient.from_settings(...)` instance per registration.
-The `/jev` command reuses the evaluate handler via `tools.handle_jev`.
+
+### 8. Verify the loader (no TypeSafe call)
+
+```bash
+hermes plugins list --user
+TYPESAFE_API_KEY=test-hermes-plugin-key \
+  hermes plugins doctor "$HOME/.hermes/plugins/jev-plugin-for-hermes" --ci
+```
+
+`hermes plugins doctor` imports the plugin in a temporary Hermes home. It is a
+loader check, not a Jev API call. A green doctor run does not prove the
+production TypeSafe contract.
+
+If the plugin does not appear, run:
+
+```bash
+HERMES_PLUGINS_DEBUG=1 hermes plugins list
+```
+
+### 9. Start a new Hermes session and try it
+
+Restart the CLI session (and the gateway, if you use one) so the enabled
+plugin is imported.
+
+In the session you should see the plugin in `/plugins`, and the model can
+call `jev-plugin-for-hermes:jev_evaluate` and
+`jev-plugin-for-hermes:jev_price_assess`. Load the playbook with the
+namespaced skill `jev-plugin-for-hermes:jev-playbook`.
+
+Smoke-test without waiting for the model:
+
+```text
+/jev {"state":{"title":"RTX 5090 32 GB","price":12499},"questions":{"exact_match":{"type":"noul","instructions":"Does this listing exactly match RTX 5090 32 GB?"}}}
+```
+
+A successful call returns `{ "ok": true, ... }` with `answers`. A missing key,
+timeout, HTTP error, or malformed body returns `{ "ok": false, "error": ... }`
+and never echoes the API key or the raw response body.
+
+### Disable or uninstall
+
+```bash
+hermes plugins disable jev-plugin-for-hermes
+```
+
+That leaves the files in place. To drop a symlink install:
+
+```bash
+rm "$HOME/.hermes/plugins/jev-plugin-for-hermes"
+```
+
+That removes the link, not this repository. If you installed from git with
+`hermes plugins install`, use `hermes plugins remove <name>` after checking
+`hermes plugins list`.
 
 ## Question types
 
 Independent questions belong in one `jev_evaluate` call. State must be factual,
-compact, JSON-compatible evidence — Jev does not retrieve data.
+compact, JSON-compatible evidence. Jev does not retrieve data.
 
 - **`noul`**: probability that a proposition is true. Requires `instructions`.
 - **`choice`**: one named category. `criteria` is a non-empty `{name: description}` object.
@@ -140,8 +312,7 @@ more risk.
 The API contract follows TypeSafe's documented `POST /v1/systemone` endpoint.
 Success returns allowlisted API fields (`answers`, optional `model` and `usage`)
 inside `{ "ok": true, ... }`. The plugin owns `ok` / `error`; vendor fields
-cannot overwrite them. Expected local or API failures return
-`{ "ok": false, "error": ... }` and never expose the response body or API key.
+cannot overwrite them.
 
 ## Development
 
@@ -155,22 +326,19 @@ TYPESAFE_API_KEY=test-hermes-plugin-key \
 ```
 
 CI runs the pytest, ruff, pip-audit, and gitleaks steps on every push and pull
-request (see `.github/workflows/ci.yml`). The test suite is **offline** and never sends the key or state to the network.
-`hermes plugins doctor` imports the plugin in a temporary Hermes home. It is a
-loader check, not a Jev API call.
+request (see `.github/workflows/ci.yml`). The test suite is **offline** and
+never sends the key or state to the network.
 
 Local caches, virtualenvs, coverage reports, Hermes runtime dirs (`.hermes/`,
 `plugin-data/`), and secret files (`.env`, `.op.env`, `*.pem`, `*.key`, `*.p12`,
 `*.pfx`, `auth.json`, `credentials.json`) are gitignored. Keep
-`TYPESAFE_API_KEY` out of the repository. This plugin does not load a repo `.env`;
-set the key with `hermes config set TYPESAFE_API_KEY`. A tracked
-`.env.example`, if present, must contain dummy values only.
+`TYPESAFE_API_KEY` out of the repository.
 
 Layout:
 
 ```
 plugin.yaml                  # native manifest (kind: standalone)
-__init__.py                  # register(ctx): tools, skill, /jev wiring
+__init__.py                  # register(ctx): tools, skill, hook, /jev wiring
 schemas.py                   # model-facing JSON schemas
 tools.py                     # handlers + handle_jev (never raise into the agent loop)
 client.py                    # PluginSettings, stdlib HTTPS client, request validation

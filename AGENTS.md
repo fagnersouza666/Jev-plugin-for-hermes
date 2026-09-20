@@ -167,6 +167,10 @@ matches production.
 
 ## Local install (source of truth stays this repo)
 
+The user-facing walkthrough (what the plugin does in Hermes, how load/hooks
+work, and numbered install steps) lives in [`README.md`](README.md). The
+commands below are the operator short form:
+
 ```bash
 mkdir -p "$HOME/.hermes/plugins"
 ln -sfn "$PWD" "$HOME/.hermes/plugins/jev-plugin-for-hermes"

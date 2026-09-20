@@ -47,8 +47,10 @@ a repo `.env`. A tracked `.env.example`, if present, may contain dummy keys only
 
 ## Documentation
 
-`README.md` must remain English. Persist project knowledge here or in
-`AGENTS.md` instead of mixing languages in the root README.
+`README.md` must remain English. It is the user-facing guide: purpose, how
+the plugin loads and runs inside Hermes Agent, numbered install steps, tool
+payloads, settings, and the security boundary. Persist contributor knowledge
+here or in `AGENTS.md` instead of mixing languages in the root README.
 
 Full-tree defect reports live in [`bug-report.md`](bug-report.md) (full scan
 20/09/2026; historical BUG-001–011 stay in the appendix as resolved).
