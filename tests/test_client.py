@@ -98,6 +98,22 @@ def test_build_request_accepts_score_and_choice():
     assert request.questions["kind"]["criteria"] == {"a": "Option A"}
 
 
+def test_build_request_rejects_choice_criteria_that_collide_after_strip():
+    with pytest.raises(JevValidationError, match="unique after stripping"):
+        build_request(
+            "evidence",
+            {
+                "kind": {
+                    "type": "choice",
+                    "instructions": "Which?",
+                    "criteria": {"a": "one", " a ": "two"},
+                },
+            },
+            "jev-latest",
+            20000,
+        )
+
+
 @pytest.mark.parametrize(
     ("endpoint", "error_match"),
     [
@@ -151,6 +167,62 @@ def test_client_sends_documented_payload_without_logging_secret():
     assert payload["state"] == "hello"
     assert payload["model"] == "jev-latest"
     assert payload["questions"]["urgent"]["type"] == "noul"
+
+
+def test_client_accepts_current_choice_and_score_metadata():
+    def opener(*args, **kwargs):
+        return FakeResponse(
+            {
+                "answers": {
+                    "kind": {
+                        "type": "choice",
+                        "choice": "yes",
+                        "confidence": 0.9,
+                        "probabilities": {"yes": 0.9, "no": 0.1},
+                    },
+                    "risk": {
+                        "type": "score",
+                        "score": 1,
+                        "confidence": 0.8,
+                        "legend": {"0": "weak", "1": "strong"},
+                        "probabilities": {"0": 0.2, "1": 0.8},
+                    },
+                }
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener)
+    result = client.evaluate(
+        state="hello",
+        questions={
+            "kind": {
+                "type": "choice",
+                "instructions": "Pick",
+                "criteria": {"yes": "Yes", "no": "No"},
+            },
+            "risk": {
+                "type": "score",
+                "instructions": "Rate",
+                "criteria": ["weak", "strong"],
+            },
+        },
+    )
+
+    assert result["answers"] == {
+        "kind": {
+            "type": "choice",
+            "choice": "yes",
+            "confidence": 0.9,
+            "probabilities": {"yes": 0.9, "no": 0.1},
+        },
+        "risk": {
+            "type": "score",
+            "score": 1,
+            "confidence": 0.8,
+            "legend": {"0": "weak", "1": "strong"},
+            "probabilities": {"0": 0.2, "1": 0.8},
+        },
+    }
 
 
 def test_missing_key_fails_before_transport(monkeypatch):
@@ -449,6 +521,8 @@ def test_parse_answers_rejects_nan_in_response_body():
 
 
 def test_parse_answers_rejects_invalid_model_and_usage():
+    questions = {"q": {"type": "noul", "instructions": "True?"}}
+
     def opener(*args, **kwargs):
         return FakeResponse(
             {
@@ -459,10 +533,19 @@ def test_parse_answers_rejects_invalid_model_and_usage():
 
     client = JevClient(api_key="x", opener=opener)
     with pytest.raises(JevProtocolError, match="answers object"):
-        client.evaluate(
-            state="hello",
-            questions={"q": {"type": "noul", "instructions": "True?"}},
+        client.evaluate(state="hello", questions=questions)
+
+    def opener_long_model(*args, **kwargs):
+        return FakeResponse(
+            {
+                "model": "x" * 129,
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+            }
         )
+
+    client = JevClient(api_key="x", opener=opener_long_model)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(state="hello", questions=questions)
 
     def opener_usage(*args, **kwargs):
         return FakeResponse(
@@ -474,10 +557,55 @@ def test_parse_answers_rejects_invalid_model_and_usage():
 
     client = JevClient(api_key="x", opener=opener_usage)
     with pytest.raises(JevProtocolError, match="answers object"):
-        client.evaluate(
-            state="hello",
-            questions={"q": {"type": "noul", "instructions": "True?"}},
+        client.evaluate(state="hello", questions=questions)
+
+    def opener_extra_usage_key(*args, **kwargs):
+        return FakeResponse(
+            {
+                "usage": {"input_tokens": 1, "prompt_tokens": 2},
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+            }
         )
+
+    client = JevClient(api_key="x", opener=opener_extra_usage_key)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(state="hello", questions=questions)
+
+    def opener_negative_usage(*args, **kwargs):
+        return FakeResponse(
+            {
+                "usage": {"input_tokens": -1},
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener_negative_usage)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(state="hello", questions=questions)
+
+    def opener_bool_usage(*args, **kwargs):
+        return FakeResponse(
+            {
+                "usage": {"input_tokens": True},
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener_bool_usage)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(state="hello", questions=questions)
+
+    def opener_float_usage(*args, **kwargs):
+        return FakeResponse(
+            {
+                "usage": {"output_tokens": 1.5},
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener_float_usage)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(state="hello", questions=questions)
 
 
 def test_parse_answers_returns_sanitized_allowlisted_payload():

@@ -21,7 +21,7 @@ from urllib.request import Request
 DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 DEFAULT_API_KEY_ENV = "TYPESAFE_API_KEY"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.2"
 _QUESTION_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _ALLOWED_TYPES = {"noul", "choice", "score"}
 _TIMEOUT_MIN = 1.0
@@ -142,7 +142,10 @@ def _validate_choice_criteria(question: dict[str, Any], name: str) -> dict[str, 
         for k, v in criteria.items()
     ):
         raise JevValidationError(f"choice question {name!r} criteria must map strings to descriptions")
-    return {k.strip(): v.strip() for k, v in criteria.items()}
+    cleaned = {k.strip(): v.strip() for k, v in criteria.items()}
+    if len(cleaned) != len(criteria):
+        raise JevValidationError(f"choice question {name!r} criteria keys must be unique after stripping")
+    return cleaned
 
 
 def _validate_score_criteria(question: dict[str, Any], name: str) -> list[str]:
@@ -290,6 +293,61 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("invalid JSON constant")
 
 
+_MAX_ANSWER_METADATA_ITEMS = 64
+_MAX_MODEL_CHARS = 128
+_USAGE_KEYS = frozenset({"input_tokens", "output_tokens"})
+
+
+def _validate_probability_map(value: Any) -> None:
+    if not isinstance(value, Mapping) or not value or len(value) > _MAX_ANSWER_METADATA_ITEMS:
+        raise JevProtocolError("Jev API response did not contain an answers object")
+    for key, probability in value.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(probability, (int, float))
+            or isinstance(probability, bool)
+            or not math.isfinite(probability)
+            or probability < 0
+            or probability > 1
+        ):
+            raise JevProtocolError("Jev API response did not contain an answers object")
+
+
+def _validate_answer_metadata(body: Mapping[str, Any], allowed_keys: set[str]) -> None:
+    if not set(body).issubset(allowed_keys):
+        raise JevProtocolError("Jev API response did not contain an answers object")
+    if "confidence" in body:
+        confidence = body["confidence"]
+        if (
+            not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(confidence)
+            or confidence < 0
+            or confidence > 1
+        ):
+            raise JevProtocolError("Jev API response did not contain an answers object")
+    if "probabilities" in body:
+        _validate_probability_map(body["probabilities"])
+    if "legend" in body:
+        legend = body["legend"]
+        if (
+            not isinstance(legend, Mapping)
+            or not legend
+            or len(legend) > _MAX_ANSWER_METADATA_ITEMS
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in legend.items())
+        ):
+            raise JevProtocolError("Jev API response did not contain an answers object")
+
+
+def _copy_validated_answer_metadata(out: dict[str, Any], body: Mapping[str, Any]) -> None:
+    if "confidence" in body:
+        out["confidence"] = body["confidence"]
+    if "probabilities" in body:
+        out["probabilities"] = dict(body["probabilities"])
+    if "legend" in body:
+        out["legend"] = dict(body["legend"])
+
+
 def _validate_answer_body(name: str, body: Any, expected_question: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise JevProtocolError("Jev API response did not contain an answers object")
@@ -309,16 +367,20 @@ def _validate_answer_body(name: str, body: Any, expected_question: Mapping[str, 
         return {"type": "noul", "noul": value}
 
     if kind == "choice":
-        if set(body.keys()) != {"type", "choice"}:
+        _validate_answer_metadata(body, {"type", "choice", "confidence", "probabilities"})
+        if "choice" not in body:
             raise JevProtocolError("Jev API response did not contain an answers object")
         criteria = expected_question["criteria"]
         choice = body["choice"]
         if not isinstance(choice, str) or choice not in criteria:
             raise JevProtocolError("Jev API response did not contain an answers object")
-        return {"type": "choice", "choice": choice}
+        out: dict[str, Any] = {"type": "choice", "choice": choice}
+        _copy_validated_answer_metadata(out, body)
+        return out
 
     if kind == "score":
-        if set(body.keys()) != {"type", "score"}:
+        _validate_answer_metadata(body, {"type", "score", "confidence", "legend", "probabilities"})
+        if "score" not in body:
             raise JevProtocolError("Jev API response did not contain an answers object")
         rubric = expected_question["criteria"]
         value = body["score"]
@@ -326,7 +388,9 @@ def _validate_answer_body(name: str, body: Any, expected_question: Mapping[str, 
             raise JevProtocolError("Jev API response did not contain an answers object")
         if not math.isfinite(value) or value < 0 or value > len(rubric) - 1:
             raise JevProtocolError("Jev API response did not contain an answers object")
-        return {"type": "score", "score": value}
+        out = {"type": "score", "score": value}
+        _copy_validated_answer_metadata(out, body)
+        return out
 
     raise JevProtocolError("Jev API response did not contain an answers object")
 
@@ -357,19 +421,20 @@ def _parse_answers(raw: bytes, status: int, expected: Mapping[str, Any]) -> dict
 
     if "model" in decoded:
         model = decoded["model"]
-        if not isinstance(model, str) or not model.strip():
+        if not isinstance(model, str) or not model.strip() or len(model.strip()) > _MAX_MODEL_CHARS:
             raise JevProtocolError("Jev API response did not contain an answers object")
         result["model"] = model.strip()
 
     if "usage" in decoded:
         usage = decoded["usage"]
-        if not isinstance(usage, dict):
+        if not isinstance(usage, dict) or not set(usage).issubset(_USAGE_KEYS):
             raise JevProtocolError("Jev API response did not contain an answers object")
-        try:
-            json.dumps(usage, **_JSON_DUMP_KWARGS)
-        except (TypeError, ValueError) as exc:
-            raise JevProtocolError("Jev API response did not contain an answers object") from exc
-        result["usage"] = usage
+        cleaned_usage: dict[str, int] = {}
+        for key, value in usage.items():
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise JevProtocolError("Jev API response did not contain an answers object")
+            cleaned_usage[key] = value
+        result["usage"] = cleaned_usage
 
     try:
         json.dumps(result, **_JSON_DUMP_KWARGS)
