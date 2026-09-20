@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Ruff
+        run: |
+          . .venv/bin/activate
+          python -m ruff check .
+
+      - name: Pytest
+        run: |
+          . .venv/bin/activate
+          python -m pytest -q
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies and pip-audit
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e '.[dev]' pip-audit==2.10.1
+
+      - name: pip-audit (dev extras)
+        run: |
+          . .venv/bin/activate
+          python -m pip_audit
+
+      - name: Install gitleaks
+        run: |
+          curl -fSL "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz" | tar -xz
+          sudo install -m 755 gitleaks /usr/local/bin/gitleaks
+
+      - name: gitleaks
+        run: gitleaks detect --source . --verbose --redact
