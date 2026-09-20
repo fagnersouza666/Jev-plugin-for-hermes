@@ -8,9 +8,15 @@ should stay in the repository.
 
 ```bash
 python -m pytest -q
+python -m ruff check .
+pip install -e '.[dev]' pip-audit==2.10.1 && python -m pip_audit
+gitleaks detect --source . --verbose --redact
 TYPESAFE_API_KEY=test-hermes-plugin-key \
   hermes plugins doctor "$PWD" --ci
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs pytest, ruff, pip-audit, and
+gitleaks on every push and pull request.
 
 - Tests stay offline: inject `opener` on `JevClient` or patch `JevClient` in
   handlers (fake classes need a `from_settings` classmethod because
@@ -41,5 +47,17 @@ A tracked `.env.example`, if present, may contain dummy keys only.
 `README.md` must remain English. Persist project knowledge here or in
 `AGENTS.md` instead of mixing languages in the root README.
 
-Full-tree defect reports live in [`bug-report.md`](bug-report.md) (replaced on
-each `/bug-detector` run, not appended).
+Full-tree defect reports live in [`bug-report.md`](bug-report.md) (historical
+snapshot; see the resolution table at the top for current status).
+
+Security audits (OWASP/LGPD, threat model) live in
+[`relatorio-seguranca.md`](relatorio-seguranca.md).
+
+## `api_url` trust boundary
+
+`api_url` is operator-controlled Hermes config, not a tool argument. The
+plugin sends one Bearer POST to the configured host. `_validate_endpoint` enforces
+HTTPS (except loopback for local tests) but does not block private IPs or cloud
+metadata URLs. Misconfigured `api_url` exposes `TYPESAFE_API_KEY` to the chosen
+host — document this in README/AGENTS; do not add RFC1918 blocking unless a
+future change explicitly requires it.

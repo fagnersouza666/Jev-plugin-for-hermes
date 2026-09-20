@@ -65,8 +65,12 @@ valid Python identifier.
 6. **Jev is evidence, not authorization.** Tool descriptions, skill text, and
    `jev_price_assess` criteria must keep saying that. Never add a buy / publish /
    send-money / delete path here.
-7. **HTTPS except loopback.** `_validate_endpoint` rejects credentials, query
-   strings, fragments, and plain HTTP except `localhost` / `127.0.0.1` / `::1`.
+7. **HTTPS except loopback; `api_url` is an operator trust boundary.**
+   `_validate_endpoint` rejects credentials, query strings, fragments, and plain
+   HTTP except `localhost` / `127.0.0.1` / `::1`. It does **not** block private
+   IPs, link-local, or cloud metadata hosts over HTTPS — that is explicit
+   operator misconfiguration, not SSRF via tool arguments. Document this in
+   README; do not treat a malicious `api_url` as a plugin bug.
 8. **Handlers never break the agent loop.** Catch unexpected exceptions in
    `tools.py` and return `internal_error`. Dual import (`from .client` vs
    `from client`) exists so pytest can load the plugin root; keep both paths.

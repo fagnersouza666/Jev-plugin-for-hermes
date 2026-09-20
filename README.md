@@ -62,7 +62,7 @@ in `client.py` (not from a repo `.env`):
 
 | Setting | Default | Notes |
 |---|---|---|
-| `api_url` | `https://api.typesafe.ai/v1/systemone` | HTTPS only, except loopback for local tests |
+| `api_url` | `https://api.typesafe.ai/v1/systemone` | Operator trust boundary: one Bearer POST to this host (HTTPS only, except loopback for local tests). Tool arguments cannot change it. |
 | `default_model` | `jev-latest` | Pin a tested version (for example `jev-1.13.0`) after calibration |
 | `timeout_seconds` | `30.0` | Clamped once to 1–600 |
 | `max_state_chars` | `20000` | Clamped once to 256–200000 |
@@ -122,11 +122,15 @@ cannot overwrite them. Expected local or API failures return
 
 ```bash
 python -m pytest -q
+python -m ruff check .
+pip install -e '.[dev]' pip-audit==2.10.1 && python -m pip_audit
+gitleaks detect --source . --verbose --redact
 TYPESAFE_API_KEY=test-hermes-plugin-key \
   hermes plugins doctor "$PWD" --ci
 ```
 
-The test suite is **offline** and never sends the key or state to the network.
+CI runs the pytest, ruff, pip-audit, and gitleaks steps on every push and pull
+request (see `.github/workflows/ci.yml`). The test suite is **offline** and never sends the key or state to the network.
 `hermes plugins doctor` imports the plugin in a temporary Hermes home. It is a
 loader check, not a Jev API call.
 
@@ -159,8 +163,14 @@ no tool override, filesystem, subprocess, browser, or MCP capability.
   timeouts, and malformed responses.
 - Authorization is `Bearer` from `TYPESAFE_API_KEY`. Handlers must not echo
   exception text, response bodies, or the key.
-- HTTPS except loopback (`localhost`, `127.0.0.1`, `::1`). The client does not
-  follow redirects, so the Bearer token stays on the validated `api_url`.
+- **`api_url` is an operator trust boundary.** The plugin sends `Authorization:
+  Bearer` to whatever host Hermes configures. `_validate_endpoint` enforces HTTPS
+  (except loopback for local tests) and rejects credentials, query strings, and
+  fragments, but it does not block private IPs, link-local, or cloud metadata
+  URLs. That is explicit operator configuration, not SSRF via tool arguments.
+  Point `api_url` only at a trusted TypeSafe endpoint (or a local mock).
+- The client does not follow redirects, so the Bearer token stays on the
+  validated `api_url`.
 - Request bounds: serialized state up to `max_state_chars`, full JSON payload
   up to 200000 characters, at most 32 questions, strict question allowlist, no
   `NaN` / `Infinity` in JSON.

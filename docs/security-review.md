@@ -1,4 +1,4 @@
-# Security review — documentation (README / AGENTS / docs)
+# Security review — documentation and CI (SEC-004 / SEC-005)
 
 > System: jev-plugin-for-hermes
 > Date: 2026-09-19 | Version: 0.1.0
@@ -11,9 +11,9 @@
 - CRITICAL: 0
 - HIGH: 0
 - MEDIUM/LOW: 0
-- Positives: dummy doctor key only (`test-hermes-plugin-key`); no real `TYPESAFE_API_KEY`; gitignore still covers `.env`, `.op.env`, `*.pem` / `*.key` / `*.p12` / `*.pfx`, `auth.json`, `credentials.json`; README restates fail-closed, Bearer-from-env, and “Jev is evidence, not authorization”.
+- Positives: `api_url` documented as operator trust boundary (not SSRF via tool args); CI runs pytest, ruff, pip-audit on dev extras, and gitleaks CLI (no licensed gitleaks-action); workflow uses `permissions: contents: read`; gitleaks install uses `curl -fSL`; no secrets in workflow; dummy doctor key only in docs (`test-hermes-plugin-key`); gitignore still covers secret file patterns.
 - Verdict: **PASS**
 
-Scope: `README.md`, `AGENTS.md`, `docs/development.md`. SQL/XSS/RCE playbooks do not apply.
+Scope: `README.md`, `AGENTS.md`, `docs/development.md`, `docs/relatorio-seguranca.md`, `.github/workflows/ci.yml`.
 
-No secrets were introduced. The English README documents that the plugin does not load `.env` from this repository.
+No secrets were introduced. README remains English-only and states the plugin does not load `.env` from this repository.
