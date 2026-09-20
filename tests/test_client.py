@@ -9,6 +9,9 @@ from jev_plugin_for_hermes.client import (
     JevProtocolError,
     JevTransportError,
     JevValidationError,
+    _MAX_RESPONSE_BYTES,
+    _NoRedirect,
+    _default_opener,
     build_request,
 )
 
@@ -19,10 +22,11 @@ class FakeResponse:
         self._payload = payload
         self._raw = raw
 
-    def read(self):
-        if self._raw is not None:
-            return self._raw
-        return json.dumps(self._payload).encode("utf-8")
+    def read(self, n=-1):
+        data = self._raw if self._raw is not None else json.dumps(self._payload).encode("utf-8")
+        if n < 0:
+            return data
+        return data[:n]
 
     def getcode(self):
         return self.status
@@ -232,3 +236,144 @@ def test_protocol_errors_fail_closed(payload, raw, match):
             state="hello",
             questions={"q": {"type": "noul", "instructions": "Is this true?"}},
         )
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_no_redirect_handler_rejects_redirects(code):
+    handler = _NoRedirect()
+    assert handler.redirect_request(None, None, code, "", {}, "https://attacker.example/") is None
+
+
+def test_default_opener_does_not_follow_redirects():
+    opener = _default_opener()
+    assert callable(opener)
+    client = JevClient(api_key="x")
+    handlers = client._opener.__self__.handlers
+    assert any(isinstance(handler, _NoRedirect) for handler in handlers)
+
+
+def test_oversized_response_body_fails_closed():
+    def opener(*args, **kwargs):
+        return FakeResponse({}, raw=b"x" * (_MAX_RESPONSE_BYTES + 1))
+
+    client = JevClient(api_key="x", opener=opener)
+    with pytest.raises(JevProtocolError, match="size limit"):
+        client.evaluate(
+            state="hello",
+            questions={"q": {"type": "noul", "instructions": "Is this true?"}},
+        )
+
+
+def test_http_error_drains_and_closes_response():
+    class DrainableBody:
+        def __init__(self):
+            self.read_calls = []
+            self.closed = False
+
+        def read(self, n=-1):
+            self.read_calls.append(n)
+            return b""
+
+        def close(self):
+            self.closed = True
+
+    body = DrainableBody()
+    error = HTTPError(
+        "https://api.typesafe.ai/v1/systemone",
+        503,
+        "Service Unavailable",
+        {},
+        body,
+    )
+
+    def opener(*args, **kwargs):
+        raise error
+
+    client = JevClient(api_key="x", opener=opener)
+    with pytest.raises(JevHTTPError) as exc_info:
+        client.evaluate(
+            state="hello",
+            questions={"q": {"type": "noul", "instructions": "Is this true?"}},
+        )
+    assert exc_info.value.status == 503
+    assert body.read_calls
+    assert body.closed is True
+
+
+@pytest.mark.parametrize(
+    ("answers", "match"),
+    [
+        ({"answers": {}}, "answers object"),
+        ({"answers": {"q": {"type": "noul", "noul": 0.5}, "extra": {"type": "noul"}}}, "answers object"),
+        ({"answers": {"q": None}}, "answers object"),
+        ({"answers": {"q": "not-a-dict"}}, "answers object"),
+        ({"answers": {"q": {"type": "choice", "noul": 0.5}}}, "answers object"),
+    ],
+)
+def test_parse_answers_rejects_incomplete_or_mismatched_shapes(answers, match):
+    def opener(*args, **kwargs):
+        return FakeResponse(answers)
+
+    client = JevClient(api_key="x", opener=opener)
+    with pytest.raises(JevProtocolError, match=match):
+        client.evaluate(
+            state="hello",
+            questions={"q": {"type": "noul", "instructions": "Is this true?"}},
+        )
+
+
+def test_build_request_rejects_nan_and_infinity():
+    with pytest.raises(JevValidationError, match="JSON-compatible"):
+        build_request({"price": float("nan")}, {"q": {"type": "noul", "instructions": "x?"}}, "jev-latest", 20000)
+    with pytest.raises(JevValidationError, match="JSON-compatible"):
+        build_request({"price": float("inf")}, {"q": {"type": "noul", "instructions": "x?"}}, "jev-latest", 20000)
+
+
+def test_build_request_rejects_too_many_questions():
+    questions = {f"q{i}": {"type": "noul", "instructions": "x?"} for i in range(33)}
+    with pytest.raises(JevValidationError, match="at most 32"):
+        build_request("ok", questions, "jev-latest", 20000)
+
+
+def test_build_request_rejects_oversized_payload():
+    huge = "x" * 199_950
+    questions = {
+        "q": {
+            "type": "choice",
+            "instructions": "Pick",
+            "criteria": {"a": huge},
+        }
+    }
+    with pytest.raises(JevValidationError, match="request payload exceeds"):
+        build_request("ok", questions, "jev-latest", 20000)
+
+
+def test_build_request_strips_choice_criteria_and_drops_extra_keys():
+    request = build_request(
+        "ok",
+        {
+            "kind": {
+                "type": "choice",
+                "instructions": "Which?",
+                "criteria": {" a ": " Option A "},
+                "temperature": 0.9,
+            }
+        },
+        "jev-latest",
+        20000,
+    )
+    assert request.questions["kind"] == {
+        "type": "choice",
+        "instructions": "Which?",
+        "criteria": {"a": "Option A"},
+    }
+
+
+def test_build_request_drops_extra_keys_from_noul():
+    request = build_request(
+        "ok",
+        {"q": {"type": "noul", "instructions": "True?", "temperature": 0.5, "criteria": ["ignored"]}},
+        "jev-latest",
+        20000,
+    )
+    assert request.questions["q"] == {"type": "noul", "instructions": "True?"}

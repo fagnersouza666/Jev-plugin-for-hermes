@@ -9,12 +9,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
@@ -26,6 +27,9 @@ _TIMEOUT_MIN = 1.0
 _TIMEOUT_MAX = 600.0
 _STATE_CHARS_MIN = 256
 _STATE_CHARS_MAX = 200_000
+_MAX_RESPONSE_BYTES = 1_000_000
+_MAX_QUESTIONS = 32
+_JSON_DUMP_KWARGS = {"ensure_ascii": False, "sort_keys": True, "separators": (",", ":"), "allow_nan": False}
 
 
 class JevError(Exception):
@@ -115,7 +119,7 @@ def _serialized_state(state: Any, max_chars: int) -> str:
         text = state
     elif isinstance(state, (Mapping, list)):
         try:
-            text = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            text = json.dumps(state, **_JSON_DUMP_KWARGS)
         except (TypeError, ValueError) as exc:
             raise JevValidationError("state must contain only JSON-compatible values") from exc
     else:
@@ -137,7 +141,7 @@ def _validate_choice_criteria(question: dict[str, Any], name: str) -> dict[str, 
         for k, v in criteria.items()
     ):
         raise JevValidationError(f"choice question {name!r} criteria must map strings to descriptions")
-    return dict(criteria)
+    return {k.strip(): v.strip() for k, v in criteria.items()}
 
 
 def _validate_score_criteria(question: dict[str, Any], name: str) -> list[str]:
@@ -155,23 +159,25 @@ def _validate_question(name: str, raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise JevValidationError(f"question {name!r} must be an object")
 
-    question = dict(raw)
-    kind = question.get("type")
+    kind = raw.get("type")
     if not isinstance(kind, str) or kind.lower() not in _ALLOWED_TYPES:
         raise JevValidationError(f"question {name!r} type must be noul, choice, or score")
-    question["type"] = kind.lower()
+    kind = kind.lower()
 
-    instructions = question.get("instructions")
+    instructions = raw.get("instructions")
     if not isinstance(instructions, str) or not instructions.strip():
         raise JevValidationError(f"question {name!r} needs non-empty instructions")
-    question["instructions"] = instructions.strip()
 
-    if question["type"] == "choice":
-        question["criteria"] = _validate_choice_criteria(question, name)
-    elif question["type"] == "score":
-        question["criteria"] = _validate_score_criteria(question, name)
+    out: dict[str, Any] = {
+        "type": kind,
+        "instructions": instructions.strip(),
+    }
+    if kind == "choice":
+        out["criteria"] = _validate_choice_criteria(raw, name)
+    elif kind == "score":
+        out["criteria"] = _validate_score_criteria(raw, name)
 
-    return question
+    return out
 
 
 def build_request(state: Any, questions: Mapping[str, Any], model: str, max_state_chars: int) -> JevRequest:
@@ -186,11 +192,20 @@ def build_request(state: Any, questions: Mapping[str, Any], model: str, max_stat
     }
     if len(normalized) != len(questions):
         raise JevValidationError("question names must be strings")
-    return JevRequest(
+    if len(normalized) > _MAX_QUESTIONS:
+        raise JevValidationError(f"questions must contain at most {_MAX_QUESTIONS} entries")
+    request = JevRequest(
         state=_serialized_state(state, max_state_chars),
         model=model.strip(),
         questions=normalized,
     )
+    try:
+        payload_size = len(json.dumps(request.as_payload(), **_JSON_DUMP_KWARGS))
+    except (TypeError, ValueError) as exc:
+        raise JevValidationError("request payload must contain only JSON-compatible values") from exc
+    if payload_size > _STATE_CHARS_MAX:
+        raise JevValidationError(f"request payload exceeds the limit of {_STATE_CHARS_MAX} characters")
+    return request
 
 
 def _validate_endpoint(endpoint: str) -> str:
@@ -212,6 +227,32 @@ def _clamp_timeout(timeout: float) -> float:
 
 def _clamp_max_state_chars(max_state_chars: int) -> int:
     return max(_STATE_CHARS_MIN, min(int(max_state_chars), _STATE_CHARS_MAX))
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _default_opener() -> Callable[..., Any]:
+    return urllib.request.build_opener(_NoRedirect).open
+
+
+def _read_limited(response: Any, limit: int) -> bytes:
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise JevProtocolError("Jev API response exceeded the size limit")
+    return data
+
+
+def _close_http_error(exc: HTTPError) -> None:
+    status = int(exc.code)
+    try:
+        if exc.fp is not None:
+            exc.fp.read(_MAX_RESPONSE_BYTES + 1)
+    finally:
+        exc.close()
+    raise JevHTTPError(status) from exc
 
 
 def _post_json(
@@ -236,23 +277,29 @@ def _post_json(
     try:
         with opener(http_request, timeout=timeout) as response:
             status = int(getattr(response, "status", response.getcode()))
-            raw = response.read()
+            raw = _read_limited(response, _MAX_RESPONSE_BYTES)
     except HTTPError as exc:
-        raise JevHTTPError(int(exc.code)) from exc
+        _close_http_error(exc)
     except (URLError, TimeoutError, OSError) as exc:
         raise JevTransportError("could not reach the Jev API") from exc
     return status, raw
 
 
-def _parse_answers(raw: bytes, status: int) -> dict[str, Any]:
+def _parse_answers(raw: bytes, status: int, expected: Mapping[str, Any]) -> dict[str, Any]:
     if status < 200 or status >= 300:
         raise JevHTTPError(status)
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        raise JevProtocolError("Jev API response exceeded the size limit")
     try:
         decoded = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise JevProtocolError("Jev API returned invalid JSON") from exc
-    if not isinstance(decoded, dict) or not isinstance(decoded.get("answers"), dict):
+    answers = decoded.get("answers") if isinstance(decoded, dict) else None
+    if not isinstance(answers, dict) or set(answers) != set(expected):
         raise JevProtocolError("Jev API response did not contain an answers object")
+    for name, body in answers.items():
+        if not isinstance(body, dict) or body.get("type") != expected[name]["type"]:
+            raise JevProtocolError("Jev API response did not contain an answers object")
     return decoded
 
 
@@ -277,7 +324,7 @@ class JevClient:
             self.max_state_chars = _clamp_max_state_chars(max_state_chars)
         except (TypeError, ValueError) as exc:
             raise JevConfigurationError("timeout and max_state_chars must be numeric") from exc
-        self._opener = opener or urlopen
+        self._opener = opener or _default_opener()
 
     @classmethod
     def from_settings(
@@ -309,7 +356,7 @@ class JevClient:
         model: str = DEFAULT_MODEL,
     ) -> dict[str, Any]:
         request = build_request(state, questions, model, self.max_state_chars)
-        body = json.dumps(request.as_payload(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(request.as_payload(), **_JSON_DUMP_KWARGS).encode("utf-8")
         status, raw = _post_json(
             self._opener,
             endpoint=self.endpoint,
@@ -317,4 +364,4 @@ class JevClient:
             body=body,
             api_key=self._resolved_key(),
         )
-        return _parse_answers(raw, status)
+        return _parse_answers(raw, status, request.questions)
