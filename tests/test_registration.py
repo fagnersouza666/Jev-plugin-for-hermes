@@ -34,3 +34,37 @@ def test_registers_tools_skill_and_command():
 
     usage = json.loads(ctx.commands["jev"](""))
     assert usage["error"]["code"] == "usage"
+
+    invalid = json.loads(ctx.commands["jev"]("{not json"))
+    assert invalid["error"]["code"] == "invalid_json"
+
+
+def test_jev_command_delegates_to_evaluate_handler(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        @classmethod
+        def from_settings(cls, settings, **kwargs):
+            return cls(**kwargs)
+
+        def evaluate(self, **kwargs):
+            captured.update(kwargs)
+            return {"model": "jev-latest", "answers": {"q": {"type": "noul", "noul": 0.5}}}
+
+    monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", FakeClient)
+    ctx = FakeContext()
+    plugin.register(ctx)
+
+    payload = json.dumps(
+        {
+            "state": "evidence",
+            "questions": {"q": {"type": "noul", "instructions": "True?"}},
+        }
+    )
+    result = json.loads(ctx.commands["jev"](payload))
+    assert result["ok"] is True
+    assert result["answers"]["q"]["noul"] == 0.5
+    assert captured["state"] == "evidence"
