@@ -1,12 +1,14 @@
 ---
 name: jev-playbook
 description: Use Jev for typed decisions in Hermes. Load this before routing or classifying evidence.
-version: 0.1.0
+version: 0.2.2
 ---
 
 # Jev Playbook for Hermes
 
-Use the namespaced tool `jev-plugin-for-hermes:jev_evaluate` when a decision can be expressed as typed questions over supplied evidence. Use `jev-plugin-for-hermes:jev_price_assess` for an e-commerce offer.
+Use the namespaced tool `jev-plugin-for-hermes:jev_evaluate` when a decision can be expressed as typed questions over supplied evidence. Use `jev-plugin-for-hermes:jev_price_assess` for an e-commerce offer. The plugin also registers `pre_tool_call`, so every Hermes tool invocation is assessed before execution.
+
+The global hook is an advisory guard, not a replacement for Hermes policy. An `allow` result with reason code `no_issue` leaves normal execution and approvals unchanged; `review` or `deny` blocks the call before execution. Contradictory pairs such as `allow` + `destructive_change` are treated as malformed decisions and blocked. A failed assessment also blocks the call. Non-allow results include a bounded reason code such as `insufficient_context` or `deployment_or_release`; this is diagnostic context, not authorization.
 
 ## Primitive selection
 
