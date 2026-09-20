@@ -33,10 +33,10 @@ At runtime Hermes namespaces tools and the skill as
 
 ```
 plugin.yaml                 # native manifest (kind: standalone)
-__init__.py                 # register(ctx): tools, skill, /jev
+__init__.py                 # register(ctx): tools, skill, /jev wiring
 schemas.py                  # model-facing JSON schemas
-tools.py                    # handlers (never raise into the agent loop)
-client.py                   # stdlib HTTPS client + request validation
+tools.py                    # handlers + handle_jev (never raise into the agent loop)
+client.py                   # PluginSettings, stdlib HTTPS client, request validation
 skills/jev-playbook/SKILL.md
 tests/                      # offline pytest; package loaded as jev_plugin_for_hermes
 ```
@@ -82,9 +82,9 @@ valid Python identifier.
   optional `description=` metadata.
 - Skill: `ctx.register_skill("jev-playbook", path_to_SKILL.md)`. Do not copy
   skills into `~/.hermes/skills/` (collision risk). Prefer `register_skill`.
-- Command: `ctx.register_command("jev", handler, ...)` — in-session `/jev`,
-  not a `hermes` CLI subcommand. Empty / invalid JSON must return usage errors
-  without calling the API.
+- Command: `ctx.register_command("jev", ...)` delegates to `tools.handle_jev` —
+  in-session `/jev`, not a `hermes` CLI subcommand. Empty / invalid JSON must
+  return usage errors without calling the API.
 
 `plugin.yaml` must stay aligned with code:
 
@@ -93,8 +93,10 @@ valid Python identifier.
 - `config_schema`: `api_url`, `default_model`, `timeout_seconds`, `max_state_chars`
 - `kind: standalone`, `manifest_version: 2`
 
-Settings are read via `ctx.get_config(key, default)`, not from `.env` in this
-repo. Users set the key with `hermes config set TYPESAFE_API_KEY`.
+Settings are read via `PluginSettings.from_ctx(ctx)` in `client.py` (defaults
+and clamps applied once), not from `.env` in this repo. `make_handlers` builds
+one `JevClient.from_settings(...)` per registration. Users set the key with
+`hermes config set TYPESAFE_API_KEY`.
 
 ## Changing a tool
 
@@ -165,3 +167,12 @@ calibrated; `jev-latest` is for exploration.
 
 When adding a feature, prefer extending `jev_evaluate` questions or a thin
 adapter like `jev_price_assess` over new privileged surface.
+
+## Documentation language
+
+- **`README.md` is English only.** Do not add Portuguese or any other language
+  to it. User-facing install, usage, settings, and security notes belong there.
+- `AGENTS.md` and `skills/jev-playbook/SKILL.md` stay English.
+- Extra contributor notes go in `docs/` and should also be English so the
+  public tree has one language. Do not commit Portuguese review dumps into
+  `README.md`.

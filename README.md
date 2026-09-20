@@ -1,75 +1,91 @@
 # jev-plugin-for-hermes
 
-Standalone Hermes Agent plugin that exposes TypeSafe Jev as typed decision tools and a namespaced skill.
+Standalone Hermes Agent plugin that exposes TypeSafe Jev (System One) as typed
+decision tools and a namespaced skill.
 
-## Current scope
+The plugin evaluates supplied evidence and returns `{ "ok": true, ... }` or
+`{ "ok": false, "error": ... }`. It does not buy, alert, publish, delete, or
+authorize anything.
 
-- `jev_evaluate`: generic System One request with `noul`, `choice`, and `score` questions.
-- `jev_price_assess`: convenience adapter for product-price candidates.
-- `jev-playbook`: explicit skill, loaded as `jev-plugin-for-hermes:jev-playbook`.
-- `/jev`: manual JSON command for inspection and smoke tests.
-- No import-time network calls, no credential persistence, and no irreversible action.
+The first intended consumer is a price-monitor pipeline. Numeric policy, identity
+checks, freshness, seller allowlists, alerting, and human review stay **outside**
+this plugin.
 
-The first intended consumer is the existing price-monitor pipeline. The plugin only produces an assessment; numeric policy, alerting, purchase decisions, and human review remain outside the plugin.
+Contributor working notes live in [`AGENTS.md`](AGENTS.md). The runtime
+playbook for calling Jev from Hermes is
+[`skills/jev-playbook/SKILL.md`](skills/jev-playbook/SKILL.md)
+(`jev-plugin-for-hermes:jev-playbook`).
+
+## Surfaces
+
+| Surface | Name | Purpose |
+|---|---|---|
+| Tool | `jev_evaluate` | Generic `noul` / `choice` / `score` questions |
+| Tool | `jev_price_assess` | Convenience adapter for a product offer |
+| Skill | `jev-playbook` | Routing and safe-interpretation playbook |
+| Command | `/jev <json>` | Manual inspection / smoke test |
+
+At runtime Hermes namespaces tools and the skill as
+`jev-plugin-for-hermes:<name>`.
+
+There are no import-time network calls, no credential persistence, and no
+irreversible actions. The only side effect is one outbound HTTPS POST when a
+tool or `/jev` runs.
 
 ## Requirements
 
-- Hermes Agent with the native plugin system.
-- Python 3.11+ (the implementation uses only the standard library).
-- A TypeSafe API key in `TYPESAFE_API_KEY` when the plugin is enabled.
+- Hermes Agent with the native plugin system
+- Python 3.11+ (runtime uses the standard library only; no TypeSafe SDK, `httpx`, or `requests`)
+- A TypeSafe API key in `TYPESAFE_API_KEY` when the plugin is enabled
+  ([TypeSafe console](https://console.typesafe.ai))
 
-Agent working notes for this repository live in [`AGENTS.md`](AGENTS.md). The
-runtime playbook for calling Jev from Hermes is `skills/jev-playbook/SKILL.md`.
+## Local installation
 
-## Development
-
-```bash
-cd /home/fagnersouza/Projetos/jev-plugin-for-hermes
-python -m pytest -q
-```
-
-The test suite is offline and never sends the key or state to the network.
-
-Local caches, virtualenvs, coverage reports, Hermes runtime dirs (`.hermes/`, `plugin-data/`), and secret files (`.env`, `.op.env`, `*.pem`, `*.key`, `auth.json`) are gitignored. Keep `TYPESAFE_API_KEY` out of the repository. Use `.env.example` only for dummy keys.
-
-Validate against the installed Hermes plugin loader:
-
-```bash
-TYPESAFE_API_KEY=test-hermes-plugin-key \
-  hermes plugins doctor /home/fagnersouza/Projetos/jev-plugin-for-hermes --ci
-```
-
-`hermes plugins doctor` imports the plugin in a temporary Hermes home. It is a loader check, not a Jev API call.
-
-## Local installation (not performed by this project creation)
-
-Keep this project as the canonical source and link it into the active Hermes home:
+Keep this repository as the source of truth and link it into the Hermes home:
 
 ```bash
 mkdir -p "$HOME/.hermes/plugins"
-ln -sfn /home/fagnersouza/Projetos/jev-plugin-for-hermes \
-  "$HOME/.hermes/plugins/jev-plugin-for-hermes"
+ln -sfn "$PWD" "$HOME/.hermes/plugins/jev-plugin-for-hermes"
 hermes plugins enable jev-plugin-for-hermes
-```
-
-Then configure the secret through Hermes' normal secret flow, not by committing a `.env` file:
-
-```bash
 hermes config set TYPESAFE_API_KEY
 ```
 
-If the plugin is enabled without a key, Hermes should gate it as missing its declared environment requirement. Do not put a real key in this repository.
+Do not commit `.env`, keys, or a real API URL with credentials. If the plugin is
+enabled without a key, Hermes should gate it as missing its declared environment
+requirement.
 
 ## Plugin settings
 
-Settings live under `plugins.entries.jev-plugin-for-hermes.settings` in `config.yaml`:
+Settings live under `plugins.entries.jev-plugin-for-hermes.settings` in Hermes
+`config.yaml`. They are resolved once at registration through `PluginSettings`
+in `client.py` (not from a repo `.env`):
 
-- `api_url`: default `https://api.typesafe.ai/v1/systemone`.
-- `default_model`: default `jev-latest`; pin a tested version for production.
-- `timeout_seconds`: default `30.0`, clamped by the client.
-- `max_state_chars`: default `20000`, to bound accidental prompt/cost growth.
+| Setting | Default | Notes |
+|---|---|---|
+| `api_url` | `https://api.typesafe.ai/v1/systemone` | HTTPS only, except loopback for local tests |
+| `default_model` | `jev-latest` | Pin a tested version (for example `jev-1.13.0`) after calibration |
+| `timeout_seconds` | `30.0` | Clamped once to 1–600 |
+| `max_state_chars` | `20000` | Clamped once to 256–200000 |
 
-## Example tool payload
+Handlers share one `JevClient.from_settings(...)` instance per registration.
+The `/jev` command reuses the evaluate handler via `tools.handle_jev`.
+
+## Question types
+
+Independent questions belong in one `jev_evaluate` call. State must be factual,
+compact, JSON-compatible evidence — Jev does not retrieve data.
+
+- **`noul`**: probability that a proposition is true. Requires `instructions`.
+- **`choice`**: one named category. `criteria` is a non-empty `{name: description}` object.
+- **`score`**: position on an ordered rubric. `criteria` is a list of at least two strings, worst to best.
+
+Question names: `^[A-Za-z][A-Za-z0-9_-]{0,63}$`.
+
+`jev_price_assess` sends a fixed question set (`exact_match`, `condition`,
+`seller_risk`, `deal_quality`, `recommendation`). Changing that set changes
+downstream price-monitor behavior.
+
+## Example `jev_evaluate` payload
 
 ```json
 {
@@ -94,8 +110,56 @@ Settings live under `plugins.entries.jev-plugin-for-hermes.settings` in `config.
 }
 ```
 
-The API contract follows TypeSafe's documented `POST /v1/systemone` endpoint. The tool returns the API answers plus usage metadata, wrapped in `{ "ok": true, ... }`; expected local/API failures return `{ "ok": false, "error": ... }` and never expose the response body or API key.
+The API contract follows TypeSafe's documented `POST /v1/systemone` endpoint.
+Success returns the API answers plus usage metadata, wrapped in
+`{ "ok": true, ... }`. Expected local or API failures return
+`{ "ok": false, "error": ... }` and never expose the response body or API key.
+
+## Development
+
+```bash
+python -m pytest -q
+TYPESAFE_API_KEY=test-hermes-plugin-key \
+  hermes plugins doctor "$PWD" --ci
+```
+
+The test suite is **offline** and never sends the key or state to the network.
+`hermes plugins doctor` imports the plugin in a temporary Hermes home. It is a
+loader check, not a Jev API call.
+
+Local caches, virtualenvs, coverage reports, Hermes runtime dirs (`.hermes/`,
+`plugin-data/`), and secret files (`.env`, `.op.env`, `*.pem`, `*.key`, `*.p12`,
+`*.pfx`, `auth.json`, `credentials.json`) are gitignored. Keep
+`TYPESAFE_API_KEY` out of the repository. This plugin does not load `.env`;
+set the key with `hermes config set TYPESAFE_API_KEY`. A tracked
+`.env.example`, if present, must contain dummy values only.
+
+Layout:
+
+```
+plugin.yaml                  # native manifest (kind: standalone)
+__init__.py                  # register(ctx): tools, skill, /jev wiring
+schemas.py                   # model-facing JSON schemas
+tools.py                     # handlers + handle_jev (never raise into the agent loop)
+client.py                    # PluginSettings, stdlib HTTPS client, request validation
+skills/jev-playbook/SKILL.md
+tests/                       # offline pytest
+docs/development.md          # extra contributor notes
+```
 
 ## Security boundary
 
-Hermes plugins run in-process with the user's permissions. This plugin requests no tool override, filesystem, subprocess, browser, or MCP capability. It performs one outbound HTTPS request only when explicitly called. Jev output must not be treated as sole authorization for financial, destructive, or publishing operations.
+Hermes plugins run in-process with the user's permissions. This plugin requests
+no tool override, filesystem, subprocess, browser, or MCP capability.
+
+- Fail closed on missing `TYPESAFE_API_KEY`, invalid arguments, HTTP errors,
+  timeouts, and malformed responses.
+- Authorization is `Bearer` from `TYPESAFE_API_KEY`. Handlers must not echo
+  exception text, response bodies, or the key.
+- HTTPS except loopback (`localhost`, `127.0.0.1`, `::1`).
+- Jev output is evidence, not authorization. Do not treat confidence as a
+  purchase, publish, delete, or send-money decision.
+
+## License
+
+MIT
