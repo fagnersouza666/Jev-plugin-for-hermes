@@ -16,6 +16,8 @@ TYPESAFE_API_KEY=test-hermes-plugin-key \
   handlers (fake classes need a `from_settings` classmethod because
   `make_handlers` builds one client per registration). Never send
   `TYPESAFE_API_KEY`, state, or fixtures to the network.
+- `FakeResponse.read` should accept an optional `n` because production reads
+  responses with a byte limit. The default client opener disables HTTP redirects.
 - `tests/conftest.py` loads the plugin root as `jev_plugin_for_hermes` because
   the hyphenated directory name is not a valid Python identifier.
 - `hermes plugins doctor` is a loader check in a temporary Hermes home, not a
@@ -38,3 +40,6 @@ A tracked `.env.example`, if present, may contain dummy keys only.
 
 `README.md` must remain English. Persist project knowledge here or in
 `AGENTS.md` instead of mixing languages in the root README.
+
+Full-tree defect reports live in [`bug-report.md`](bug-report.md) (replaced on
+each `/bug-detector` run, not appended).

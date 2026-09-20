@@ -13,6 +13,8 @@ Use the namespaced tool `jev-plugin-for-hermes:jev_evaluate` when a decision can
 - `noul`: probability that one proposition is true. Example: “Does this listing exactly match the target product?”
 - `choice`: one category from a named set. Example: `ignore`, `record`, `manual_review`, or `alert`.
 - `score`: a continuous position on an ordered rubric. Supply criteria from worst to best.
+  In `jev_price_assess`, a higher `seller_risk` score means a more trustworthy
+  seller, not more risk.
 
 Put independent questions in one call. Keep the state factual and compact. Include the source evidence needed for the decision; do not ask Jev to retrieve data.
 

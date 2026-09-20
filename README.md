@@ -83,7 +83,9 @@ Question names: `^[A-Za-z][A-Za-z0-9_-]{0,63}$`.
 
 `jev_price_assess` sends a fixed question set (`exact_match`, `condition`,
 `seller_risk`, `deal_quality`, `recommendation`). Changing that set changes
-downstream price-monitor behavior.
+downstream price-monitor behavior. Both score questions use worst-to-best
+rubrics: a higher `seller_risk` score means a more trustworthy seller, not
+more risk.
 
 ## Example `jev_evaluate` payload
 
@@ -104,15 +106,16 @@ downstream price-monitor behavior.
     "risk": {
       "type": "score",
       "instructions": "How risky is this listing?",
-      "criteria": ["low", "moderate", "high"]
+      "criteria": ["high", "moderate", "low"]
     }
   }
 }
 ```
 
 The API contract follows TypeSafe's documented `POST /v1/systemone` endpoint.
-Success returns the API answers plus usage metadata, wrapped in
-`{ "ok": true, ... }`. Expected local or API failures return
+Success returns allowlisted API fields (`answers`, optional `model` and `usage`)
+inside `{ "ok": true, ... }`. The plugin owns `ok` / `error`; vendor fields
+cannot overwrite them. Expected local or API failures return
 `{ "ok": false, "error": ... }` and never expose the response body or API key.
 
 ## Development
@@ -156,7 +159,13 @@ no tool override, filesystem, subprocess, browser, or MCP capability.
   timeouts, and malformed responses.
 - Authorization is `Bearer` from `TYPESAFE_API_KEY`. Handlers must not echo
   exception text, response bodies, or the key.
-- HTTPS except loopback (`localhost`, `127.0.0.1`, `::1`).
+- HTTPS except loopback (`localhost`, `127.0.0.1`, `::1`). The client does not
+  follow redirects, so the Bearer token stays on the validated `api_url`.
+- Request bounds: serialized state up to `max_state_chars`, full JSON payload
+  up to 200000 characters, at most 32 questions, strict question allowlist, no
+  `NaN` / `Infinity` in JSON.
+- Response bounds: at most 1 MiB read before parsing; incomplete or mistyped
+  `answers` objects are rejected.
 - Jev output is evidence, not authorization. Do not treat confidence as a
   purchase, publish, delete, or send-money decision.
 

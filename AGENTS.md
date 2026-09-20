@@ -70,7 +70,9 @@ valid Python identifier.
 8. **Handlers never break the agent loop.** Catch unexpected exceptions in
    `tools.py` and return `internal_error`. Dual import (`from .client` vs
    `from client`) exists so pytest can load the plugin root; keep both paths.
-9. **State is bounded.** Default `max_state_chars` is 20000 (clamped 256–200000).
+9. **State and wire payloads are bounded.** Default `max_state_chars` is 20000
+   (clamped 256–200000). The full POST JSON is capped at 200000 characters;
+   at most 32 questions per call. Responses are read with a 1 MiB hard limit.
    Timeout default is 30s (clamped 1–600). Do not remove the clamps.
 
 ## Registration contract
@@ -121,6 +123,8 @@ evidence — Jev does not retrieve data.
 
 `jev_price_assess` builds a fixed question set in `_PRICE_QUESTIONS`. Treat that
 set as product policy: changing it changes downstream price-monitor behavior.
+`seller_risk` and `deal_quality` both use worst-to-best score rubrics (higher
+score = better purchase signal).
 
 ## Python and tests
 
