@@ -3,30 +3,31 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 try:
     from .client import (
-        DEFAULT_ENDPOINT,
-        DEFAULT_MODEL,
         JevClient,
         JevConfigurationError,
         JevError,
+        PluginSettings,
     )
 except ImportError:  # pragma: no cover - only used when pytest imports plugin root directly
     from client import (  # type: ignore[no-redef]
-        DEFAULT_ENDPOINT,
-        DEFAULT_MODEL,
         JevClient,
         JevConfigurationError,
         JevError,
+        PluginSettings,
     )
 
 _PRICE_QUESTIONS = {
     "exact_match": {
         "type": "noul",
-        "instructions": "Does this listing exactly match the target product, including model, capacity, generation, and variant?",
+        "instructions": (
+            "Does this listing exactly match the target product, "
+            "including model, capacity, generation, and variant?"
+        ),
     },
     "condition": {
         "type": "choice",
@@ -59,7 +60,10 @@ _PRICE_QUESTIONS = {
     },
     "recommendation": {
         "type": "choice",
-        "instructions": "What advisory next step best fits this evidence? This is not an authorization to buy or publish.",
+        "instructions": (
+            "What advisory next step best fits this evidence? "
+            "This is not an authorization to buy or publish."
+        ),
         "criteria": {
             "ignore": "Do not retain as a candidate",
             "record": "Record for history or later comparison",
@@ -80,47 +84,50 @@ def _error(code: str, message: str, **extra: Any) -> str:
     return _json(result)
 
 
-def _client(settings: Mapping[str, Any]) -> JevClient:
-    endpoint = settings.get("api_url", DEFAULT_ENDPOINT)
-    model = settings.get("default_model", DEFAULT_MODEL)
+def _resolve_settings(settings: PluginSettings | Mapping[str, Any]) -> PluginSettings:
+    if isinstance(settings, PluginSettings):
+        return settings
+    return PluginSettings.from_mapping(settings)
+
+
+def _call_jev(
+    client: JevClient,
+    *,
+    state: Any,
+    questions: Mapping[str, Any],
+    model: str,
+    result_key: str | None = None,
+    internal_message: str,
+) -> str:
     try:
-        timeout = float(settings.get("timeout_seconds", 30.0))
-        max_state_chars = int(settings.get("max_state_chars", 20_000))
-    except (TypeError, ValueError) as exc:
-        raise JevConfigurationError("plugin settings timeout_seconds and max_state_chars must be numeric") from exc
-    if not isinstance(endpoint, str) or not isinstance(model, str):
-        raise JevConfigurationError("plugin settings api_url and default_model must be strings")
-    return JevClient(
-        endpoint=endpoint,
-        timeout=timeout,
-        max_state_chars=max_state_chars,
-    )
+        response = client.evaluate(state=state, questions=questions, model=model)
+        if result_key is None:
+            return _json({"ok": True, **response})
+        return _json({"ok": True, result_key: response})
+    except JevError as exc:
+        code = "configuration" if isinstance(exc, JevConfigurationError) else "jev_error"
+        return _error(code, str(exc))
+    except Exception:  # noqa: BLE001 - handlers must never break Hermes' tool loop
+        return _error("internal_error", internal_message)
 
 
-def _evaluate(settings: Mapping[str, Any], args: Any, **_: Any) -> str:
+def _evaluate(client: JevClient, settings: PluginSettings, args: Any, **_: Any) -> str:
     if not isinstance(args, Mapping):
         return _error("invalid_arguments", "tool arguments must be an object")
     questions = args.get("questions")
     if not isinstance(questions, Mapping):
         return _error("invalid_arguments", "questions must be a non-empty object")
-    try:
-        model = args.get("model") or settings.get("default_model", DEFAULT_MODEL)
-        response = _client(settings).evaluate(
-            state=args.get("state"),
-            questions=questions,
-            model=model,
-        )
-        return _json({"ok": True, **response})
-    except JevError as exc:
-        code = "configuration" if isinstance(exc, JevConfigurationError) else "jev_error"
-        return _error(code, str(exc))
-    except Exception:  # noqa: BLE001 - handlers must never break Hermes' tool loop
-        # Tool handlers must never break the agent loop. Do not echo arbitrary exception text: it can
-        # contain request data or secrets from a third-party library.
-        return _error("internal_error", "Jev evaluation failed unexpectedly")
+    model = args.get("model") or settings.default_model
+    return _call_jev(
+        client,
+        state=args.get("state"),
+        questions=questions,
+        model=model,
+        internal_message="Jev evaluation failed unexpectedly",
+    )
 
 
-def _price_assess(settings: Mapping[str, Any], args: Any, **_: Any) -> str:
+def _price_assess(client: JevClient, settings: PluginSettings, args: Any, **_: Any) -> str:
     if not isinstance(args, Mapping):
         return _error("invalid_arguments", "tool arguments must be an object")
     target = args.get("target")
@@ -135,29 +142,36 @@ def _price_assess(settings: Mapping[str, Any], args: Any, **_: Any) -> str:
         "offer": dict(offer),
         "instruction": "Assess only from the supplied evidence. Do not invent missing fields.",
     }
+    model = args.get("model") or settings.default_model
+    return _call_jev(
+        client,
+        state=state,
+        questions=_PRICE_QUESTIONS,
+        model=model,
+        result_key="assessment",
+        internal_message="Jev price assessment failed unexpectedly",
+    )
+
+
+def handle_jev(evaluate: Callable[..., str], raw_args: str) -> str:
+    if not raw_args.strip():
+        return _error("usage", "Use /jev with a JSON object containing state and questions.")
     try:
-        model = args.get("model") or settings.get("default_model", DEFAULT_MODEL)
-        response = _client(settings).evaluate(
-            state=state,
-            questions=_PRICE_QUESTIONS,
-            model=model,
-        )
-        return _json({"ok": True, "assessment": response})
-    except JevError as exc:
-        code = "configuration" if isinstance(exc, JevConfigurationError) else "jev_error"
-        return _error(code, str(exc))
-    except Exception:  # noqa: BLE001 - handlers must never break Hermes' tool loop
-        return _error("internal_error", "Jev price assessment failed unexpectedly")
+        payload = json.loads(raw_args)
+    except json.JSONDecodeError:
+        return _error("invalid_json", "The /jev argument is not valid JSON.")
+    return evaluate(payload)
 
 
-def make_handlers(settings: Mapping[str, Any]):
+def make_handlers(settings: PluginSettings | Mapping[str, Any]):
     """Return closures so Hermes config is resolved once per plugin registration."""
-    frozen_settings = dict(settings)
+    plugin_settings = _resolve_settings(settings)
+    client = JevClient.from_settings(plugin_settings)
 
     def evaluate(args: Any, **kwargs: Any) -> str:
-        return _evaluate(frozen_settings, args, **kwargs)
+        return _evaluate(client, plugin_settings, args, **kwargs)
 
     def price_assess(args: Any, **kwargs: Any) -> str:
-        return _price_assess(frozen_settings, args, **kwargs)
+        return _price_assess(client, plugin_settings, args, **kwargs)
 
     return evaluate, price_assess
