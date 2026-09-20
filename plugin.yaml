@@ -1,5 +1,5 @@
 name: jev-plugin-for-hermes
-version: 0.1.0
+version: 0.2.2
 manifest_version: 2
 api_version: 1
 kind: standalone
@@ -19,6 +19,8 @@ requires_env:
 provides_tools:
   - jev_evaluate
   - jev_price_assess
+provides_hooks:
+  - pre_tool_call
 config_schema:
   api_url:
     type: str

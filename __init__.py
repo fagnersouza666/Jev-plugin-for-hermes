@@ -26,20 +26,22 @@ def register(ctx: Any) -> None:
     """Register tools, the explicit skill, and the optional ``/jev`` command."""
     settings = _settings(ctx)
     evaluate, price_assess = tools.make_handlers(settings)
+    tool_call_guard = tools.make_tool_call_guard(settings)
     ctx.register_tool(
         name="jev_evaluate",
         toolset="jev",
         schema=schemas.JEV_EVALUATE,
         handler=evaluate,
-        description="Evaluate evidence with TypeSafe Jev primitives.",
+        description=schemas.JEV_EVALUATE["description"],
     )
     ctx.register_tool(
         name="jev_price_assess",
         toolset="jev",
         schema=schemas.JEV_PRICE_ASSESS,
         handler=price_assess,
-        description="Assess a product offer with Jev; advisory only.",
+        description=schemas.JEV_PRICE_ASSESS["description"],
     )
+    ctx.register_hook("pre_tool_call", tool_call_guard)
 
     skill_path = Path(__file__).parent / "skills" / "jev-playbook" / "SKILL.md"
     ctx.register_skill(
