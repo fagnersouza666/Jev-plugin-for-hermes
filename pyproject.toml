@@ -8,7 +8,7 @@ authors = [{ name = "Fagner Souza" }]
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+dev = ["pytest>=9.1.1,<10", "ruff>=0.16.8,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -20,4 +20,5 @@ line-length = 120
 extend-exclude = [".venv"]
 
 [tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["N999"]
