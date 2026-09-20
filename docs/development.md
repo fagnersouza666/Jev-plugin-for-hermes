@@ -22,6 +22,9 @@ gitleaks on every push and pull request.
   handlers (fake classes need a `from_settings` classmethod because
   `make_handlers` builds one client per registration). Never send
   `TYPESAFE_API_KEY`, state, or fixtures to the network.
+- Guard tests in `tests/test_tools.py` cover reason codes and the Hermes default
+  (no filesystem reads). Codex PreToolUse and session routing live in
+  `jev-for-codex`.
 - `FakeResponse.read` should accept an optional `n` because production reads
   responses with a byte limit. The default client opener disables HTTP redirects.
 - `tests/conftest.py` loads the plugin root as `jev_plugin_for_hermes` because
@@ -39,16 +42,16 @@ Ignore local caches, virtualenvs, coverage, Hermes runtime dirs (`.hermes/`,
 - `*.pem`, `*.key`, `*.p12`, `*.pfx`
 - `auth.json`, `credentials.json`
 
-Keep `TYPESAFE_API_KEY` out of the repository. The plugin does not load `.env`.
-A tracked `.env.example`, if present, may contain dummy keys only.
+Keep `TYPESAFE_API_KEY` out of the repository. The Hermes plugin does not load
+a repo `.env`. A tracked `.env.example`, if present, may contain dummy keys only.
 
 ## Documentation
 
 `README.md` must remain English. Persist project knowledge here or in
 `AGENTS.md` instead of mixing languages in the root README.
 
-Full-tree defect reports live in [`bug-report.md`](bug-report.md) (historical
-snapshot; see the resolution table at the top for current status).
+Full-tree defect reports live in [`bug-report.md`](bug-report.md) (full scan
+20/09/2026; historical BUG-001–011 stay in the appendix as resolved).
 
 Security audits (OWASP/LGPD, threat model) live in
 [`relatorio-seguranca.md`](relatorio-seguranca.md).

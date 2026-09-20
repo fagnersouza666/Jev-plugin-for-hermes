@@ -23,6 +23,7 @@ Surfaces:
 |---|---|---|
 | Tool | `jev_evaluate` | Generic `noul` / `choice` / `score` questions |
 | Tool | `jev_price_assess` | Convenience adapter for a product offer |
+| Hook | `pre_tool_call` | Assess every Hermes tool call before execution |
 | Skill | `jev-playbook` | Routing and safe-interpretation playbook |
 | Command | `/jev <json>` | Manual inspection / smoke test |
 
@@ -33,7 +34,7 @@ At runtime Hermes namespaces tools and the skill as
 
 ```
 plugin.yaml                 # native manifest (kind: standalone)
-__init__.py                 # register(ctx): tools, skill, /jev wiring
+__init__.py                 # register(ctx): tools, skill, hook, /jev wiring
 schemas.py                  # model-facing JSON schemas
 tools.py                    # handlers + handle_jev (never raise into the agent loop)
 client.py                   # PluginSettings, stdlib HTTPS client, request validation
@@ -51,11 +52,14 @@ valid Python identifier.
    `requests`, or a vendor client. The HTTP contract must stay explicit in
    `client.py`.
 2. **No import-time network, filesystem writes, or secret I/O.** API calls happen
-   only when a registered tool or `/jev` runs.
+   only when a registered tool, `/jev`, or the `pre_tool_call` hook runs.
 3. **No privileged capabilities.** Do not declare or use `filesystem`,
-   `subprocess`, `browser`, MCP, tool override, or lifecycle hooks unless a
-   future change has an explicit, reviewed reason. This plugin's only side
-   effect is one outbound HTTPS POST.
+   `subprocess`, `browser`, MCP, or tool override. The `pre_tool_call` lifecycle
+   hook is intentional and limited to a bounded, sanitized Jev assessment; it
+   must not execute tools, authorize irreversible side effects, or expand the
+   plugin's capabilities. Each assessed call may make one outbound HTTPS POST.
+   Hermes must not read the filesystem. Do not enable `attach_local_files` on
+   the Hermes registration path. Codex file excerpts belong in `jev-for-codex`.
 4. **Fail closed.** Missing `TYPESAFE_API_KEY`, invalid arguments, HTTP errors,
    timeouts, and malformed responses return structured `{ok: false}` (handlers)
    or typed `JevError` subclasses (client). Never proceed with a partial answer.
@@ -77,7 +81,8 @@ valid Python identifier.
 9. **State and wire payloads are bounded.** Default `max_state_chars` is 20000
    (clamped 256–200000). The full POST JSON is capped at 200000 characters;
    at most 32 questions per call. Responses are read with a 1 MiB hard limit.
-   Timeout default is 30s (clamped 1–600). Do not remove the clamps.
+   Timeout default is 30s (clamped 1–600). The `pre_tool_call` hook caps at 25s.
+   Do not remove the clamps.
 
 ## Registration contract
 
@@ -91,10 +96,20 @@ valid Python identifier.
 - Command: `ctx.register_command("jev", ...)` delegates to `tools.handle_jev` —
   in-session `/jev`, not a `hermes` CLI subcommand. Empty / invalid JSON must
   return usage errors without calling the API.
+- Hook: `ctx.register_hook("pre_tool_call", ...)` assesses every Hermes tool
+  invocation before execution. Send only a bounded, sanitized preview; return
+  no directive only for `allow` + `no_issue`; map `review`, `deny`, provider
+  failures, and malformed or contradictory decisions to Hermes' blocking
+  directive. Non-allow results include one bounded reason code for diagnostics;
+  it never authorizes or bypasses the normal approval path. The hook client uses
+  `min(timeout_seconds, 25)` so the outbound call finishes before Hermes'
+  default hook callback timeout. Do not enable `attach_local_files` on the Hermes
+  registration path.
 
 `plugin.yaml` must stay aligned with code:
 
 - `provides_tools`: `jev_evaluate`, `jev_price_assess`
+- `provides_hooks`: `pre_tool_call`
 - `requires_env`: `TYPESAFE_API_KEY` with `secret: true`
 - `config_schema`: `api_url`, `default_model`, `timeout_seconds`, `max_state_chars`
 - `kind: standalone`, `manifest_version: 2`
@@ -166,8 +181,8 @@ calibrated; `jev-latest` is for exploration.
 ## Out of scope
 
 - Hermes core patches (`run_agent.py`, `cli.py`, gateway, `hermes_cli/main.py`).
-- Irreversible or privileged actions (purchase, alerts as side effects, email,
-  filesystem, subprocess).
+- Privileged actions (purchase, alerts as side effects, email, filesystem,
+  subprocess, browser, MCP). Codex session routing lives in `jev-for-codex`.
 - Importing a vendor SDK “to make the client simpler”.
 - Portable Agent Plugins v1 (`plugin.json` + `mcp.json`) as a replacement for
   this native plugin.

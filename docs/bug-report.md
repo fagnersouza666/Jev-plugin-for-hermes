@@ -1,456 +1,359 @@
 # Bug Report — jev-plugin-for-hermes
 
-> Date: 19/09/2026 | Stack: Python 3.11+ Hermes standalone plugin (stdlib `urllib`, no runtime deps)
-> Mode: **full** (snapshot histórico)
-> Files analyzed: 8 Python modules (`client.py`, `tools.py`, `__init__.py`, `schemas.py`, `tests/conftest.py`, `tests/test_client.py`, `tests/test_tools.py`, `tests/test_registration.py`) plus `plugin.yaml` and `skills/jev-playbook/SKILL.md`
+> Date: 20/09/2026 | Stack: Python 3.11+ Hermes standalone plugin (stdlib `urllib`, no runtime deps)
+> Mode: **full**
+> Files analyzed: 8 Python modules (`client.py`, `tools.py`, `__init__.py`, `schemas.py`, `tests/conftest.py`, `tests/test_client.py`, `tests/test_tools.py`, `tests/test_registration.py`) plus `plugin.yaml`, `pyproject.toml`, and `skills/jev-playbook/SKILL.md`
 
-Graph (codebase-memory): `list_projects`, `index_status`, `get_architecture`, `search_graph` (Function/Class/Method), `trace_path(evaluate)`, `check_index_coverage`. Index was `ready` with no parse gaps, but several working-tree files were `metadata_changed` and `_post_json` was not in the graph — line-level findings below come from source reads, not from the stale symbol table.
+**Graph (codebase-memory):** `list_projects`, `index_status`, `get_architecture`, `check_index_coverage`, `search_graph`. Hermes hook/command contract: `get_code_snippet` on `hermes-agent` (`PluginContext.register_command`, `_get_pre_tool_call_directive_details`, `PluginDispatchMixin.invoke_hook`).
 
----
-
-## Status de resolução (atualizado 19/09/2026)
-
-Este documento descreve achados contra uma **versão anterior** do código. No tree atual, **BUG-001 through BUG-009 estão mitigados** em `client.py`, `tools.py`, e `schemas.py`, com testes correspondentes em `tests/test_client.py` e `tests/test_tools.py`.
-
-| ID | Severidade original | Status atual |
-|----|---------------------|--------------|
-| BUG-001 | ALTO — redirect + Bearer | **Resolvido** (`_NoRedirect`) |
-| BUG-002 | ALTO — body ilimitado | **Resolvido** (`_read_limited`, 1 MiB) |
-| BUG-003 | ALTO — rubrica seller_risk | **Resolvido** (critérios worst→best) |
-| BUG-004–009 | MÉDIO/BAIXO | **Resolvido** (ver código e testes) |
-
-Para triagem de segurança atual, use [`docs/relatorio-seguranca.md`](relatorio-seguranca.md) (auditoria OWASP/LGPD, veredicto **APROVADO COM RESSALVAS**).
+**Index coverage:** project `jev-plugin-for-hermes` ready (328 nodes, 978 edges, 0 call cycles). Cited paths had `no_recorded_issue` / `metadata_match` at index time `2026-09-20T20:23:08Z`. `parse_partial` and `skipped` were empty. Best-effort only — not a completeness proof. `__pycache__` / `.venv` are excluded by design.
 
 ---
 
-## Sumário (snapshot histórico)
+## Sumário
 
 | Severidade | Quantidade |
 |------------|------------|
 | CRITICO    | 0          |
-| ALTO       | 3          |
-| MEDIO      | 5          |
-| BAIXO      | 2          |
-| **Total**  | **10**     |
+| ALTO       | 0          |
+| MEDIO      | 0          |
+| BAIXO      | 0          |
+| **Total**  | **0**      |
 
-**Veredicto (snapshot):** ATENÇÃO
+**Veredicto:** OK
 
-The happy path (valid arguments, trusted TypeSafe `200` JSON) does not crash. Three ALTO issues can leak the API key, exhaust memory, or invert seller-risk scores in the price-monitor pipeline.
+All open findings from this snapshot (BUG-012 through BUG-018) are **resolved** in the current tree. Handlers and the hook fail closed on missing keys, HTTP errors, malformed answer bodies, contradictory pre-tool decisions, and oversized or mistyped optional vendor fields.
+
+Historical BUG-001 through BUG-011 (19/09/2026) stay **mitigated**. See the appendix.
 
 ---
 
 ## CRITICO
 
-Nenhum. No null-deref, SQL injection, or always-on production crash in the main tool loop. Handlers wrap unexpected exceptions as `{ok: false, error.code: internal_error}`.
+None. No null-deref, SQL injection, or always-on crash in the tool loop. Unexpected exceptions become `{ok: false, error.code: internal_error}` or a hook `block` directive.
 
 ---
 
 ## ALTO
 
-### BUG-001: `urlopen` follows redirects and forwards `Authorization`
+None.
 
-**Arquivo:** `client.py`
-**Linha(s):** 217-244
-
-**O que acontece:**
-`_post_json` uses the default `urllib.request.urlopen` opener. CPython's `HTTPRedirectHandler.redirect_request` copies request headers except `content-length` / `content-type`. For POST, status `301`, `302`, and `303` are followed (typically as GET) **including `Authorization: Bearer …`**. `_validate_endpoint` is not re-run on `Location`, so a redirect can target cleartext `http://`, another host, or link-local addresses that the plugin would reject as `api_url`.
-
-**Por que é um problema:**
-If the configured HTTPS endpoint (compromised vendor, mis-set `api_url`, or an open redirect) returns `Location: https://attacker.example/steal`, the TypeSafe key is sent to the attacker. `Location: http://127.0.0.1:…` or cloud metadata URLs also bypass the plugin's "HTTPS except loopback" rule. This is the only secret the plugin holds.
-
-**Código problemático:**
-
-```python
-http_request = Request(
-    endpoint,
-    data=body,
-    method="POST",
-    headers={
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": f"jev-plugin-for-hermes/{PLUGIN_VERSION}",
-    },
-)
-try:
-    with opener(http_request, timeout=timeout) as response:
-        status = int(getattr(response, "status", response.getcode()))
-        raw = response.read()
-```
-
-**Solução:**
-
-```python
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def _default_opener():
-    opener = urllib.request.build_opener(_NoRedirect)
-    return opener.open
-
-
-# JevClient.__init__:
-self._opener = opener or _default_opener()
-```
-
-Treat `301`/`302`/`303`/`307`/`308` as `JevHTTPError` (already mapped). Do not follow `Location`.
-
-**Explicação da correção:**
-A JSON API client should talk to one validated URL. Disabling redirects preserves `_validate_endpoint` and keeps the Bearer token on that URL only.
-
----
-
-### BUG-002: Response body is read with no size limit
-
-**Arquivo:** `client.py`
-**Linha(s):** 237-239, 247-256
-
-**O que acontece:**
-`response.read()` pulls the entire body into memory, then `raw.decode("utf-8")` + `json.loads` allocate again. Request `state` is clamped (`max_state_chars`, default 20_000, max 200_000), but the response is unbounded. Timeouts (1–600s) do not cap bytes.
-
-**Por que é um problema:**
-A `200` with a multi-gigabyte body (buggy gateway, wrong `api_url`, or a redirect target if BUG-001 remains) can OOM the Hermes process inside the tool call. Fail-closed elsewhere does not help if the process is killed first.
-
-**Código problemático:**
-
-```python
-with opener(http_request, timeout=timeout) as response:
-    status = int(getattr(response, "status", response.getcode()))
-    raw = response.read()
-```
-
-**Solução:**
-
-```python
-_MAX_RESPONSE_BYTES = 1_000_000  # keep in sync with a documented setting if exposed
-
-def _read_limited(response, limit: int) -> bytes:
-    data = response.read(limit + 1)
-    if len(data) > limit:
-        raise JevProtocolError("Jev API response exceeded the size limit")
-    return data
-```
-
-Use the same limit in `_parse_answers`. Reject oversize before `json.loads`.
-
-**Explicação da correção:**
-A hard cap matches the existing `max_state_chars` philosophy: bounded plugin state, fail closed, no partial answers.
-
----
-
-### BUG-003: `seller_risk` score rubric is inverted relative to `deal_quality` and the documented contract
+### BUG-012: `pre_tool_call` allows a call when `reason_code` contradicts `allow` — **Resolved**
 
 **Arquivo:** `tools.py`
-**Linha(s):** 42-59
+**Linha(s):** 111-118, 408-423
 
 **O que acontece:**
-Jev `score` criteria are documented as **worst → best** (`AGENTS.md`, `README.md`, `skills/jev-playbook/SKILL.md`). `deal_quality` follows that (invalid → exceptional). `seller_risk` lists the **safest** seller first and the **riskiest** last.
+The hook asks two independent choice questions: `action` (`allow` / `review` / `deny`) and `reason_code` (including `no_issue`, `destructive_change`, `deployment_or_release`, …). Instructions say to use `no_issue` for `allow`. After a successful `JevClient.evaluate`, the guard returns `None` (Hermes allow) as soon as `action == "allow"`, without checking `reason_code`.
+
+`review`/`deny` with a valid reason still blocks. `allow` plus any valid reason, including `destructive_change`, proceeds.
 
 **Por que é um problema:**
-The first intended consumer is a price-monitor pipeline. If it treats every score as "higher is better" (same as `deal_quality`), a high `seller_risk` looks like a good seller when the last rubric line is "High risk signals…". If it treats `seller_risk` as "higher means more risk", that contradicts the playbook's worst-to-best rule. Either way, the two scores in the same `_PRICE_QUESTIONS` payload do not share polarity. Changing this set is product policy.
+`AGENTS.md` maps malformed pre-tool decisions to Hermes' blocking directive. A contradictory pair is a valid wire payload (both values are in the criteria) but not a coherent decision. Scenario: Jev returns `allow` + `destructive_change` for `terminal` / `rm -rf ./data`. The plugin leaves the normal approval path untouched instead of blocking. That is fail-open on the only security hook this plugin registers.
 
 **Código problemático:**
 
 ```python
-"seller_risk": {
-    "type": "score",
-    "instructions": "How risky is the seller or listing for a purchase decision?",
-    "criteria": [
-        "No meaningful risk signals and strong evidence",
-        "Some uncertainty or moderate risk signals",
-        "High risk signals, weak evidence, or suspicious seller",
-    ],
-},
-"deal_quality": {
-    "type": "score",
-    "instructions": "How attractive is the offer after considering price, shipping, condition, and fit?",
-    "criteria": [
-        "Invalid or unattractive offer",
-        "Usable but weak offer",
-        "Good offer",
-        "Exceptional offer",
-    ],
-},
+answers = response["answers"]
+action = answers["action"]["choice"]
+reason_code = answers["reason_code"]["choice"]
+# ...
+if action == "allow":
+    return None
 ```
 
 **Solução:**
 
 ```python
-"seller_risk": {
-    "type": "score",
-    "instructions": "How trustworthy is the seller or listing for a purchase decision?",
-    "criteria": [
-        "High risk signals, weak evidence, or suspicious seller",
-        "Some uncertainty or moderate risk signals",
-        "No meaningful risk signals and strong evidence",
-    ],
-},
+if action == "allow" and reason_code == "no_issue":
+    return None
+if action in {"review", "deny"} and reason_code != "no_issue":
+    reason = _TOOL_CALL_REASON_CODES.get(reason_code)
+    if reason is None:
+        return {
+            "action": "block",
+            "message": (
+                f"Jev blocked tool '{tool_name}' before execution ({action}); "
+                "reason: invalid"
+            ),
+        }
+    return {
+        "action": "block",
+        "message": (
+            f"Jev blocked tool '{tool_name}' before execution ({action}); "
+            f"reason: {reason_code} — {reason}"
+        ),
+    }
+return {
+    "action": "block",
+    "message": "Jev returned an invalid pre-tool decision; the tool call was blocked.",
+}
 ```
 
-Re-calibrate any downstream thresholds that assumed increasing risk = increasing score. Add a unit test that locks the ordered lists.
+Add a unit test that `allow` + `destructive_change` returns `action: block`.
 
 **Explicação da correção:**
-Both scores then mean "higher is a better purchase signal". The playbook's worst-to-best rule holds without a special case for risk.
+`allow` is only a pass-through when the reason is `no_issue`. Any other pairing is treated as a malformed decision and blocked, matching the fail-closed hook contract.
+
+**Status now:** `_tool_call_guard` requires `allow` + `no_issue`; `test_tool_call_guard_blocks_contradictory_allow_and_reason` covers `allow` + `destructive_change`.
 
 ---
 
 ## MEDIO
 
-### BUG-004: `answers` is accepted if it is any dict — inner shape is not checked
+None.
+
+### BUG-013: Choice/score `confidence`, `probabilities`, and `legend` are validated then discarded — **Resolved**
 
 **Arquivo:** `client.py`
-**Linha(s):** 247-256
+**Linha(s):** 355-375
+**Arquivo:** `skills/jev-playbook/SKILL.md`
+**Linha(s):** 25, 33
+**Arquivo:** `__init__.py`
+**Linha(s):** 50
 
 **O que acontece:**
-Fail-closed is implemented as "HTTP 2xx + JSON object + `answers` is a dict". Missing question names, `answers: {}`, `answers: {"q": null}`, or `noul: "banana"` are returned to the model as `{ok: true, ...}`.
+TypeSafe Choice/Score answers include calibrated `confidence` and `probabilities` (Score also includes `legend`). `_validate_answer_metadata` accepts those fields, then `_validate_answer_body` returns only `{type, choice}` or `{type, score}`. `test_client_accepts_current_choice_and_score_metadata` asserts the drop. Noul stays `{type, noul}` only, which matches the vendor contract (noul has no confidence).
+
+The registered skill still tells the agent to treat confidence/probabilities as evidence and to send intermediate confidence to human review. The skill metadata promises "confidence checks".
 
 **Por que é um problema:**
-`AGENTS.md` says malformed responses must not proceed as a partial answer. A caller that does `result["answers"]["exact_match"]["noul"]` can throw in the agent, or a policy check can treat empty answers as a successful evaluation.
+The first intended consumer is a price-monitor pipeline. After a successful `jev_price_assess` / `jev_evaluate`, the model and any downstream policy cannot see the calibrated fields the API actually returned. Playbook step 5 ("human review when … confidence is intermediate") cannot be implemented from the tool result. This is not a crash; it is a silent loss of the vendor's decision quality signal.
 
 **Código problemático:**
 
 ```python
-if not isinstance(decoded, dict) or not isinstance(decoded.get("answers"), dict):
-    raise JevProtocolError("Jev API response did not contain an answers object")
-return decoded
+if kind == "choice":
+    _validate_answer_metadata(body, {"type", "choice", "confidence", "probabilities"})
+    # ...
+    return {"type": "choice", "choice": choice}
+
+if kind == "score":
+    _validate_answer_metadata(body, {"type", "score", "confidence", "legend", "probabilities"})
+    # ...
+    return {"type": "score", "score": value}
 ```
 
 **Solução:**
 
 ```python
-def _parse_answers(raw: bytes, status: int, expected: Mapping[str, Any]) -> dict[str, Any]:
-    # ... decode as today ...
-    answers = decoded.get("answers")
-    if not isinstance(answers, dict) or set(answers) != set(expected):
+if kind == "choice":
+    _validate_answer_metadata(body, {"type", "choice", "confidence", "probabilities"})
+    if "choice" not in body:
         raise JevProtocolError("Jev API response did not contain an answers object")
-    for name, body in answers.items():
-        if not isinstance(body, dict) or body.get("type") != expected[name]["type"]:
-            raise JevProtocolError("Jev API response did not contain an answers object")
-    return decoded
+    criteria = expected_question["criteria"]
+    choice = body["choice"]
+    if not isinstance(choice, str) or choice not in criteria:
+        raise JevProtocolError("Jev API response did not contain an answers object")
+    out: dict[str, Any] = {"type": "choice", "choice": choice}
+    if "confidence" in body:
+        out["confidence"] = body["confidence"]
+    if "probabilities" in body:
+        out["probabilities"] = dict(body["probabilities"])
+    return out
 ```
 
-Pass `request.questions` from `evaluate`. Keep messages generic (no raw body).
+Mirror the same copy for score (`legend` included). Keep noul as `{type, noul}`. Update `test_client_accepts_current_choice_and_score_metadata` to expect the allowlisted metadata.
 
 **Explicação da correção:**
-Success then means "every asked question has a typed answer object", which matches the plugin's fail-closed invariant.
+The plugin still owns the envelope and still rejects unknown keys. Official TypeSafe fields become visible so the playbook's confidence checks can run, without reopening vendor `ok`/`error` overwrite.
+
+**Status now:** `_copy_validated_answer_metadata` forwards allowlisted fields; `test_client_accepts_current_choice_and_score_metadata` expects them.
 
 ---
 
-### BUG-005: Vendor JSON is merged on top of `{ok: true}` in `jev_evaluate`
-
-**Arquivo:** `tools.py`
-**Linha(s):** 102-106
-
-**O que acontece:**
-`_call_jev` does `{"ok": True, **response}` when `result_key` is omitted (`jev_evaluate` / `/jev`). Keys from the API overwrite the envelope. `jev_price_assess` nests under `assessment` and is safe.
-
-**Por que é um problema:**
-If the API adds `ok`, `error`, or another reserved field, the tool result no longer matches `{ok: true, answers: ...}`. A vendor `ok: false` with a valid `answers` object would look like a local failure without `error.code`.
-
-**Código problemático:**
-
-```python
-response = client.evaluate(state=state, questions=questions, model=model)
-if result_key is None:
-    return _json({"ok": True, **response})
-return _json({"ok": True, result_key: response})
-```
-
-**Solução:**
-
-```python
-response = client.evaluate(state=state, questions=questions, model=model)
-envelope = {"ok": True, "answers": response["answers"]}
-if "model" in response:
-    envelope["model"] = response["model"]
-if "usage" in response:
-    envelope["usage"] = response["usage"]
-if result_key is None:
-    return _json(envelope)
-return _json({"ok": True, result_key: envelope})
-```
-
-**Explicação da correção:**
-The plugin owns `ok` / `error`. Vendor fields are copied by allowlist, same idea as not echoing HTTP bodies.
-
----
-
-### BUG-006: `json.dumps` serializes `NaN` / `Infinity` into the request body
+### BUG-014: `usage` and `model` are copied with almost no schema — **Resolved**
 
 **Arquivo:** `client.py`
-**Linha(s):** 116-120, 312
+**Linha(s):** 404-418
 
 **O que acontece:**
-Python's `json.dumps` defaults to `allow_nan=True`. A state object such as `{"price": float("nan")}` becomes the token `NaN`, which is not JSON. `_serialized_state` only catches `TypeError` / `ValueError` from non-serializable types, so this is not turned into `JevValidationError`.
+After answers are validated, `_parse_answers` copies `model` if it is a non-empty string, and `usage` if it is any JSON-serializable dict. There is no key allowlist, no numeric check, and no separate size cap beyond the 1 MiB raw body. Those fields are then placed on the tool envelope in `_call_jev`.
+
+TypeSafe documents `usage` as `{input_tokens, output_tokens}` and `model` as a short alias such as `jev-1.13.0`.
 
 **Por que é um problema:**
-The API may return `400` (`JevHTTPError`) instead of a local validation error, or a non-Python parser may reject the body. The plugin claims state must be JSON-compatible.
+`api_url` is an operator trust boundary, so a hostile host is not treated as SSRF via tool arguments. A buggy or compromised gateway that still returns valid `answers` can attach a 1 MiB `usage` object or a long `model` string. That text lands in the agent context (prompt-injection / noise) while `{ok: true}` stays set. Answers remain fail-closed; the optional fields are not.
 
 **Código problemático:**
 
 ```python
-text = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-```
+if "model" in decoded:
+    model = decoded["model"]
+    if not isinstance(model, str) or not model.strip():
+        raise JevProtocolError("Jev API response did not contain an answers object")
+    result["model"] = model.strip()
 
-**Solução:**
-
-```python
-text = json.dumps(
-    state,
-    ensure_ascii=False,
-    sort_keys=True,
-    separators=(",", ":"),
-    allow_nan=False,
-)
-```
-
-Use the same flags when encoding `request.as_payload()`.
-
-**Explicação da correção:**
-`allow_nan=False` raises `ValueError`, already mapped to `JevValidationError` ("state must contain only JSON-compatible values").
-
----
-
-### BUG-007: Only `state` is size-capped; questions, criteria, and `model` are not
-
-**Arquivo:** `client.py`
-**Linha(s):** 113-128, 177-193
-
-**O que acontece:**
-`max_state_chars` applies to serialized evidence. `questions` can contain many keys, long `instructions`, large `criteria` maps/lists, and a huge `model` string. That payload is POSTed in full.
-
-**Por que é um problema:**
-A jailbroken or looping tool call can send a very large body, burn TypeSafe quota, and sit on the timeout (up to 600s). This is weaker than BUG-002 (local OOM from the response) but still unbounded egress.
-
-**Código problemático:**
-
-```python
-return JevRequest(
-    state=_serialized_state(state, max_state_chars),
-    model=model.strip(),
-    questions=normalized,
-)
-```
-
-**Solução:**
-After building `JevRequest`, measure `len(json.dumps(request.as_payload(), ...))` and reject above a clamp (for example the same `max_state_chars` applied to the full body, or a dedicated `max_request_chars`). Optionally cap `len(questions)` (e.g. 32).
-
-**Explicação da correção:**
-One number already exists for "how much we are willing to send". Applying it to the whole JSON body closes the gap.
-
----
-
-### BUG-008: Question objects are copied with unknown keys still attached
-
-**Arquivo:** `client.py`
-**Linha(s):** 152-174
-**Arquivo:** `schemas.py`
-**Linha(s):** 12-27 (`additionalProperties: True`)
-
-**O que acontece:**
-`_validate_question` does `question = dict(raw)` and then overwrites `type` / `instructions` / `criteria`. Extra keys (`temperature`, nested objects, leftover `criteria` on `noul`) are forwarded to TypeSafe.
-
-**Por que é um problema:**
-The plugin is supposed to send a strict contract. Extra fields can change vendor behavior or trigger opaque HTTP errors. The JSON schema tells the model that extra properties are allowed.
-
-**Código problemático:**
-
-```python
-question = dict(raw)
-kind = question.get("type")
-# ...
-return question
-```
-
-**Solução:**
-
-```python
-out: dict[str, Any] = {
-    "type": kind.lower(),
-    "instructions": instructions.strip(),
-}
-if out["type"] == "choice":
-    out["criteria"] = _validate_choice_criteria(question, name)
-elif out["type"] == "score":
-    out["criteria"] = _validate_score_criteria(question, name)
-return out
-```
-
-Set `"additionalProperties": False` on `_QUESTION` in `schemas.py`.
-
-**Explicação da correção:**
-Allowlisting matches noul/choice/score as documented and keeps the wire payload deterministic.
-
----
-
-### BUG-009: `HTTPError` from `urlopen` is not closed
-
-**Arquivo:** `client.py`
-**Linha(s):** 236-243
-
-**O que acontece:**
-On HTTP 4xx/5xx, `urlopen` raises `HTTPError` before the `with` block starts. `HTTPError` is a file-like response. The handler maps `exc.code` and does not `close()` / drain the body.
-
-**Por que é um problema:**
-Each failed call can leave a socket until GC. One tool call is small; a retry loop or a busy agent session leaks descriptors. The body is discarded (good for secret hygiene) but the resource is not.
-
-**Código problemático:**
-
-```python
-except HTTPError as exc:
-    raise JevHTTPError(int(exc.code)) from exc
-```
-
-**Solução:**
-
-```python
-except HTTPError as exc:
+if "usage" in decoded:
+    usage = decoded["usage"]
+    if not isinstance(usage, dict):
+        raise JevProtocolError("Jev API response did not contain an answers object")
     try:
-        status = int(exc.code)
-        exc.read(1)  # discard; do not include body in JevHTTPError
-    finally:
-        exc.close()
-    raise JevHTTPError(status) from exc
+        json.dumps(usage, **_JSON_DUMP_KWARGS)
+    except (TypeError, ValueError) as exc:
+        raise JevProtocolError("Jev API response did not contain an answers object") from exc
+    result["usage"] = usage
+```
+
+**Solução:**
+
+```python
+_MAX_MODEL_CHARS = 128
+_USAGE_KEYS = {"input_tokens", "output_tokens"}
+
+if "model" in decoded:
+    model = decoded["model"]
+    if not isinstance(model, str) or not model.strip() or len(model.strip()) > _MAX_MODEL_CHARS:
+        raise JevProtocolError("Jev API response did not contain an answers object")
+    result["model"] = model.strip()
+
+if "usage" in decoded:
+    usage = decoded["usage"]
+    if not isinstance(usage, dict) or not set(usage).issubset(_USAGE_KEYS):
+        raise JevProtocolError("Jev API response did not contain an answers object")
+    cleaned: dict[str, int] = {}
+    for key, value in usage.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        cleaned[key] = value
+    result["usage"] = cleaned
 ```
 
 **Explicação da correção:**
-Same fail-closed HTTP mapping, with the socket released immediately.
+Optional vendor fields then match the documented System One shape. Unknown usage keys fail closed instead of entering the agent transcript.
+
+**Status now:** `_MAX_MODEL_CHARS = 128`, `_USAGE_KEYS` allowlist, and strict int validation in `_parse_answers`; extended tests in `test_parse_answers_rejects_invalid_model_and_usage`.
+
+---
+
+### BUG-015: Hook Jev timeout equals Hermes `pre_tool_call` callback timeout — **Resolved**
+
+**Arquivo:** `client.py`
+**Linha(s):** 70-91
+**Arquivo:** `tools.py`
+**Linha(s):** 448-455
+**Arquivo:** `__init__.py`
+**Linha(s):** 29
+
+**O que acontece:**
+`PluginSettings` defaults `timeout_seconds` to 30.0 (clamped 1–600). `make_tool_call_guard` builds a `JevClient` with that timeout. Hermes runs `pre_tool_call` under `plugins.hook_callback_timeout` (default 30s, fail-closed). On timeout Hermes abandons the worker thread (never joined) and injects its own `block` directive.
+
+The plugin's urllib timeout and the host hook timeout are therefore the same number. DNS + connect + POST + parse can exceed 30s wall clock even when the socket timeout is 30s.
+
+**Por que é um problema:**
+A slow TypeSafe call does not return the plugin's `Jev pre-tool assessment failed` message. Hermes kills the callback, leaves `urlopen` running on an abandoned thread, and blocks the tool with the generic hook-timeout text. Under a busy session that can accumulate sockets until the abandoned reads finish. Fail-closed still holds (the tool does not run); the leak and the opaque message are the defect.
+
+**Código problemático:**
+
+```python
+tool_call_guard = tools.make_tool_call_guard(settings)
+# settings.timeout_seconds default 30.0 — same as Hermes hook_callback_timeout
+```
+
+**Solução:**
+
+```python
+def make_tool_call_guard(
+    settings: PluginSettings | Mapping[str, Any],
+    *,
+    attach_local_files: bool = False,
+):
+    plugin_settings = _resolve_settings(settings)
+    hook_timeout = max(1.0, min(plugin_settings.timeout_seconds, 25.0))
+    hook_settings = PluginSettings(
+        api_url=plugin_settings.api_url,
+        default_model=plugin_settings.default_model,
+        timeout_seconds=hook_timeout,
+        max_state_chars=plugin_settings.max_state_chars,
+    )
+    client = JevClient.from_settings(hook_settings)
+    # ... register guard with hook_settings ...
+```
+
+Keep the 30s default for `jev_evaluate` / `jev_price_assess` / `/jev`. Document that the hook uses a tighter cap so it finishes before Hermes abandons the worker. Add a test that `make_tool_call_guard` passes a timeout `< 30` when settings use the default.
+
+**Explicação da correção:**
+The hook then raises `JevTransportError` (mapped to a plugin block message) while the worker is still joined by Hermes, instead of racing the host's 30s abandon path.
+
+**Status now:** `make_tool_call_guard` uses `dataclasses.replace` with `_HOOK_TIMEOUT_MAX = 25.0`; `test_make_tool_call_guard_uses_tighter_timeout_than_default_settings` covers default and custom settings.
 
 ---
 
 ## BAIXO
 
-### BUG-010: Choice criteria keys and descriptions are not stripped
+None.
+
+### BUG-016: Choice criteria keys can collide after `strip()` — **Resolved**
 
 **Arquivo:** `client.py`
-**Linha(s):** 131-140 vs 143-149
+**Linha(s):** 136-145
 
 **O que acontece:**
-Score labels are `.strip()`ped. Choice keys/values are only checked for non-empty `strip()`, then stored as original strings (`" a "` stays `" a "`).
+Score labels are stripped into a list (duplicates stay as separate ranks). Choice keys are stripped into a dict. `{"a": "one", " a ": "two"}` becomes `{"a": "two"}` with no error.
 
 **Por que é um problema:**
-A model-generated choice name with padding may not match what downstream code expects (`"new"` vs `"new "`). Low impact because the usual caller is the LLM, not a strict enum.
+A model-generated criteria object with padded duplicate names silently drops a category. Downstream `choice in criteria` then rejects a vendor label that the caller thought it sent. Low likelihood because the usual caller is the LLM and keys are short identifiers.
 
 **Solução:**
-Store `{k.strip(): v.strip() for k, v in criteria.items()}` after the existing emptiness checks.
+
+```python
+cleaned = {k.strip(): v.strip() for k, v in criteria.items()}
+if len(cleaned) != len(criteria):
+    raise JevValidationError(f"choice question {name!r} criteria keys must be unique after stripping")
+return cleaned
+```
+
+**Explicação da correção:**
+Collision becomes a local `JevValidationError` instead of a smaller question set on the wire.
+
+**Status now:** `_validate_choice_criteria` rejects collisions; `test_build_request_rejects_choice_criteria_that_collide_after_strip` covers the case.
 
 ---
 
-### BUG-011: `PLUGIN_VERSION` is a second copy of `plugin.yaml` / `pyproject.toml`
+### BUG-017: `register()` `description=` is not the schema description the model reads — **Resolved**
 
-**Arquivo:** `client.py`
-**Linha(s):** 22
+**Arquivo:** `__init__.py`
+**Linha(s):** 30-42
+**Arquivo:** `schemas.py`
+**Linha(s):** 29-61
 
 **O que acontece:**
-`User-Agent: jev-plugin-for-hermes/0.1.0` is hardcoded. Manifest and packaging versions are separate strings.
+`AGENTS.md` requires `schema["description"]` and the optional `description=` metadata to stay in sync. They do not:
+
+- `jev_evaluate` metadata: `"Evaluate evidence with TypeSafe Jev primitives."` vs a longer schema text that names Noul/Choice/Score and forbids irreversible authorization.
+- `jev_price_assess` metadata: `"Assess a product offer with Jev; advisory only."` vs the schema paragraph about not buying/publishing/alerting.
 
 **Por que é um problema:**
-A release that bumps `plugin.yaml` but not `PLUGIN_VERSION` sends a stale UA. Not a functional break.
+If a Hermes surface shows the metadata string instead of (or in addition to) the schema, the "not authorization" wording is weaker. The model-facing schema is still the longer text, so this is documentation drift, not a logic break.
 
 **Solução:**
-Single constant imported by tests that assert `PLUGIN_VERSION ==` the YAML/TOML version, or generate UA from `plugin.yaml` at register time without a network read beyond the local file.
+Pass `description=schemas.JEV_EVALUATE["description"]` and `description=schemas.JEV_PRICE_ASSESS["description"]` (or a shared constant). Extend `test_registers_tools_skill_and_command` to compare those strings.
+
+**Explicação da correção:**
+One string per tool, so a wording change cannot drift between schema and registration.
+
+**Status now:** `register()` passes `schemas.JEV_*["description"]`; `test_registers_tools_skill_and_command` compares metadata to schema text.
+
+---
+
+### BUG-018: Playbook frontmatter version is stale — **Resolved**
+
+**Arquivo:** `skills/jev-playbook/SKILL.md`
+**Linha(s):** 4
+
+**O que acontece:**
+The skill YAML `version` is `0.1.0`. `plugin.yaml` / `pyproject.toml` / `PLUGIN_VERSION` are `0.2.2`. `test_plugin_version_matches_manifest_and_pyproject` does not read the skill.
+
+**Por que é um problema:**
+Operators and agents that key cache/reload on skill version may keep an old playbook mentally even after plugin bumps. No runtime break.
+
+**Solução:**
+Set the skill `version` to `0.2.2` (or a dedicated skill version) and assert it in `test_plugin_version_matches_manifest_and_pyproject` if the versions are meant to move together.
+
+**Explicação da correção:**
+Version strings stop implying the playbook is still the first 0.1.0 draft.
+
+**Status now:** skill `version: 0.2.2`; `test_plugin_version_matches_manifest_and_pyproject` asserts lockstep with `PLUGIN_VERSION`, `plugin.yaml`, and `pyproject.toml`.
 
 ---
 
@@ -458,21 +361,51 @@ Single constant imported by tests that assert `PLUGIN_VERSION ==` the YAML/TOML 
 
 What is in good shape:
 
-- Stdlib-only client; no vendor SDK; transport is injectable and tests stay offline.
-- Missing `TYPESAFE_API_KEY` fails before `opener` (`test_missing_key_fails_before_transport`).
-- `_validate_endpoint` rejects credentials, query, fragment, and non-loopback HTTP.
-- Timeouts and `max_state_chars` are clamped.
-- HTTP status and transport failures become typed errors; handlers do not echo exception text or response bodies (`test_*_internal_error_does_not_leak_exception_text`).
-- `except Exception` in `_call_jev` is intentional (Hermes tool loop) and is not a silent `pass`.
+- Stdlib-only client; transport is injectable; tests stay offline.
+- Missing `TYPESAFE_API_KEY` fails before `opener`.
+- `_NoRedirect` plus `HTTPError` drain/close; 1 MiB response cap; `allow_nan=False`; `parse_constant` rejects NaN/Inf.
+- `_parse_answers` requires exact question names, typed bodies, noul in `[0, 1]`, choice in criteria, score in `[0, len(rubric)-1]`.
+- Plugin `ok` / `error` are not overwritten by vendor fields.
+- Timeouts and `max_state_chars` are clamped; full POST JSON capped at 200_000 characters; at most 32 questions.
+- `_PRICE_QUESTIONS["seller_risk"]` is worst-to-best (higher score = more trustworthy seller).
+- Hermes `register()` does not pass `attach_local_files=True`; `test_hermes_guard_does_not_read_local_files` locks that.
+- `/jev` empty / invalid JSON never calls the API. Hermes documents `fn(raw_args: str) -> str | None`, so `handle_jev` calling `.strip()` is in contract.
 - Dual import (`from .client` vs `from client`) is required for pytest loading the hyphenated directory.
-- `/jev` empty / invalid JSON never calls the API. Hermes invokes `fn(raw_args: str)` and catches command exceptions in `cli.py`, so a `None` argument is not a realistic agent-loop break.
-- `_PRICE_QUESTIONS` is copied inside `_validate_question`; the module dict is not mutated per request.
-- `jev_price_assess` keeps the "advisory, not authorization" wording.
 
 False positives from SCAN patterns (not filed):
 
-- `except Exception` in `tools.py` (required fail-closed wrapper).
-- `question["type"]` after an `isinstance` check.
-- Test `api_key="x"` / `"secret-value"` fixtures (not production secrets).
+- `except Exception` in `_call_jev` / `_tool_call_guard` (required fail-closed wrappers, not `pass`).
+- Dict `["answers"]` after `_parse_answers` / a successful evaluate.
+- Test fixtures `api_key="x"` / `"secret-value"`.
+- `timeout_seconds` of NaN: current `max(1.0, min(value, 600.0))` maps NaN to 1.0 (order-dependent; `math.isfinite` would still be clearer).
+- Codex `attach_local_files=True` helpers in `tools.py` — unused on the Hermes registration path; routing lives in `jev-for-codex`.
+- Noul rejecting extra keys including `confidence` — matches TypeSafe (noul has no confidence field).
 
-Recommended fix order: BUG-001, BUG-002, BUG-003, then protocol tightening (004–008).
+All recommended fixes from this snapshot (BUG-012 through BUG-018) are applied.
+
+---
+
+## Appendix — previous snapshot (19/09/2026)
+
+Those findings targeted an older tree. Status in the current code:
+
+| ID | Original severity | Status now |
+|----|-------------------|------------|
+| BUG-001 | ALTO — redirect + Bearer | **Resolved** (`_NoRedirect`) |
+| BUG-002 | ALTO — unbounded response body | **Resolved** (`_read_limited`, 1 MiB) |
+| BUG-003 | ALTO — inverted `seller_risk` rubric | **Resolved** (worst → best) |
+| BUG-004 | MEDIO — `answers` dict not shape-checked | **Resolved** (`_validate_answer_body`) |
+| BUG-005 | MEDIO — vendor JSON overwrote `ok` | **Resolved** (allowlisted envelope) |
+| BUG-006 | MEDIO — `NaN` / `Infinity` in request JSON | **Resolved** (`allow_nan=False`) |
+| BUG-007 | MEDIO — only `state` size-capped | **Resolved** (payload cap + 32 questions) |
+| BUG-008 | MEDIO — extra question keys forwarded | **Resolved** (allowlist + `additionalProperties: false`) |
+| BUG-009 | MEDIO — `HTTPError` not closed | **Resolved** (`_close_http_error`) |
+| BUG-010 | BAIXO — choice criteria not stripped | **Resolved** |
+| BUG-011 | BAIXO — `PLUGIN_VERSION` drift | **Resolved** (test vs YAML/TOML) |
+| BUG-012 | ALTO — contradictory `allow` + reason | **Resolved** (`allow` + `no_issue` only) |
+| BUG-013 | MEDIO — metadata discarded | **Resolved** (`_copy_validated_answer_metadata`) |
+| BUG-014 | MEDIO — loose `model` / `usage` | **Resolved** (allowlist + bounds) |
+| BUG-015 | MEDIO — hook timeout race | **Resolved** (25s hook cap) |
+| BUG-016 | BAIXO — choice criteria collision | **Resolved** (unique-after-strip check) |
+| BUG-017 | BAIXO — registration description drift | **Resolved** (schema description reused) |
+| BUG-018 | BAIXO — skill version stale | **Resolved** (0.2.2 + test) |

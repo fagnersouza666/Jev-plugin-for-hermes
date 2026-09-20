@@ -1,7 +1,7 @@
 # Auditoria de Segurança — jev-plugin-for-hermes
 
 > Sistema: jev-plugin-for-hermes (plugin Hermes nativo standalone)
-> Data: 19/09/2026 | Versão: 0.1.0 |
+> Data: 19/09/2026 (nota 20/09/2026: Codex saiu deste plugin; ver `jev-for-codex`) | Versão: 0.2.2 |
 > Stack: Python 3.11+ / Hermes Agent plugin (stdlib only)
 > Baseado em: OWASP Top 10:2021, LGPD (Lei 13.709/2018), CWE
 
@@ -25,7 +25,7 @@ Auditoria **full-project** (modo audit) sobre:
 
 **Limitação de cobertura:** index `ready` (144 nós), porém `_parse_answers` / `_post_json` não indexados como símbolos; achados de linha confirmados por leitura de fonte e testes.
 
-**Superfície:** plugin in-process no agente Hermes. Único efeito colateral: um POST HTTPS para TypeSafe Jev. Não há servidor HTTP, SQL, upload, subprocess, MCP ou filesystem privilegiado.
+**Superfície:** plugin in-process no agente Hermes. Efeito colateral: um POST HTTPS para TypeSafe Jev. Não há servidor HTTP, SQL, upload, subprocess ou MCP. O hook Hermes não lê o filesystem; o adaptador Codex pode anexar trechos cwd-bounded de scripts locais (opt-in).
 
 ---
 
@@ -100,7 +100,7 @@ return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 **Referência:** OWASP A04:2021 — Insecure Design | CWE-915 (Improperly Controlled Modification of Dynamically-Determined Object Attributes)
 
-**Correção aplicada:** `_parse_answers` retorna só `answers`, `model` (string), `usage` (dict JSON-safe). Testes confirmam stripping de `ok`/`error` vendor.
+**Correção aplicada:** `_parse_answers` retorna só `answers`, `model` (string ≤128 chars), e `usage` (`input_tokens` / `output_tokens` como int ≥0). Metadados TypeSafe allowlisted (`confidence`, `probabilities`, `legend`) passam em choice/score após validação. Testes confirmam stripping de `ok`/`error` vendor e rejeição de chaves extras em `usage`.
 
 ---
 

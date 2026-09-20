@@ -22,15 +22,40 @@ playbook for calling Jev from Hermes is
 |---|---|---|
 | Tool | `jev_evaluate` | Generic `noul` / `choice` / `score` questions |
 | Tool | `jev_price_assess` | Convenience adapter for a product offer |
+| Hook | `pre_tool_call` | Assess every Hermes tool call before execution |
 | Skill | `jev-playbook` | Routing and safe-interpretation playbook |
 | Command | `/jev <json>` | Manual inspection / smoke test |
+
+The `pre_tool_call` hook sends a bounded, sanitized preview of every tool name and
+argument object to Jev. `allow` with reason code `no_issue` leaves Hermes' normal
+policy and approval path unchanged. `review` and `deny` block the call before
+execution; contradictory pairs such as `allow` + `destructive_change` are treated
+as malformed decisions and blocked fail-closed. This preserves Hermes' normal
+approval and hook ordering, and Jev never gets unilateral authority to execute or
+authorize a side effect. If the assessment cannot be completed, the tool call is
+blocked fail-closed.
+
+For a non-`allow` result, the hook also requests one bounded reason code (for
+example `insufficient_context` or `deployment_or_release`) and includes that
+code and its fixed local description in the blocking message. This is diagnostic
+context only; it does not turn Jev into an authorization or bypass mechanism.
+
+The Hermes hook does **not** read the filesystem. Codex integration (session
+router, PreToolUse adapter, named profiles) lives in a separate project,
+[`jev-for-codex`](../jev-for-codex).
+
+This is intentionally an opt-in cost and privacy trade-off: each tool call adds a
+synchronous HTTPS round trip and sends the sanitized preview to the configured
+TypeSafe endpoint. Common credential fields and inline token patterns are redacted,
+but the preview is still derived from tool arguments; do not enable this mode for
+sensitive data without accepting that boundary.
 
 At runtime Hermes namespaces tools and the skill as
 `jev-plugin-for-hermes:<name>`.
 
 There are no import-time network calls, no credential persistence, and no
-irreversible actions. The only side effect is one outbound HTTPS POST when a
-tool or `/jev` runs.
+irreversible actions. Network calls happen only when a tool or `/jev` runs, or when
+the `pre_tool_call` hook assesses a tool invocation.
 
 ## Requirements
 
@@ -62,9 +87,9 @@ in `client.py` (not from a repo `.env`):
 
 | Setting | Default | Notes |
 |---|---|---|
-| `api_url` | `https://api.typesafe.ai/v1/systemone` | Operator trust boundary: one Bearer POST to this host (HTTPS only, except loopback for local tests). Tool arguments cannot change it. |
+| `api_url` | `https://api.typesafe.ai/v1/systemone` | Operator trust boundary: Bearer POSTs to this host (HTTPS only, except loopback for local tests). Tool arguments cannot change it. |
 | `default_model` | `jev-latest` | Pin a tested version (for example `jev-1.13.0`) after calibration |
-| `timeout_seconds` | `30.0` | Clamped once to 1–600 |
+| `timeout_seconds` | `30.0` | Clamped once to 1–600 for tools and `/jev`; the `pre_tool_call` hook uses `min(timeout_seconds, 25)` so the Jev call finishes before Hermes' default 30s hook callback timeout |
 | `max_state_chars` | `20000` | Clamped once to 256–200000 |
 
 Handlers share one `JevClient.from_settings(...)` instance per registration.
@@ -137,7 +162,7 @@ loader check, not a Jev API call.
 Local caches, virtualenvs, coverage reports, Hermes runtime dirs (`.hermes/`,
 `plugin-data/`), and secret files (`.env`, `.op.env`, `*.pem`, `*.key`, `*.p12`,
 `*.pfx`, `auth.json`, `credentials.json`) are gitignored. Keep
-`TYPESAFE_API_KEY` out of the repository. This plugin does not load `.env`;
+`TYPESAFE_API_KEY` out of the repository. This plugin does not load a repo `.env`;
 set the key with `hermes config set TYPESAFE_API_KEY`. A tracked
 `.env.example`, if present, must contain dummy values only.
 
@@ -157,10 +182,21 @@ docs/development.md          # extra contributor notes
 ## Security boundary
 
 Hermes plugins run in-process with the user's permissions. This plugin requests
-no tool override, filesystem, subprocess, browser, or MCP capability.
+no tool override, filesystem, subprocess, browser, or MCP capability. It does
+register the documented `pre_tool_call` hook so it can assess calls before they
+execute.
 
 - Fail closed on missing `TYPESAFE_API_KEY`, invalid arguments, HTTP errors,
-  timeouts, and malformed responses.
+  timeouts, malformed responses, and failed pre-tool assessments.
+- The hook sends only a bounded preview; common credential fields and inline token
+  patterns are redacted, but no redaction scheme can guarantee that arbitrary user
+  content is non-sensitive. Treat the configured TypeSafe endpoint as a recipient
+  of tool-argument previews.
+- Hermes `pre_tool_call` does not read the local filesystem. `attach_local_files`
+  stays off on the registration path. Codex file excerpts belong in `jev-for-codex`.
+- `review` and `deny` from Jev block the call before execution. The blocking
+  message includes a bounded reason code. The hook never bypasses Hermes' normal
+  approval and policy path; Jev is not an authorization system.
 - Authorization is `Bearer` from `TYPESAFE_API_KEY`. Handlers must not echo
   exception text, response bodies, or the key.
 - **`api_url` is an operator trust boundary.** The plugin sends `Authorization:
@@ -176,8 +212,6 @@ no tool override, filesystem, subprocess, browser, or MCP capability.
   `NaN` / `Infinity` in JSON.
 - Response bounds: at most 1 MiB read before parsing; incomplete or mistyped
   `answers` objects are rejected.
-- Jev output is evidence, not authorization. Do not treat confidence as a
-  purchase, publish, delete, or send-money decision.
 
 ## License
 
