@@ -1,7 +1,9 @@
 import json
+import re
 from pathlib import Path
 
 import jev_plugin_for_hermes as plugin
+from jev_plugin_for_hermes.client import PLUGIN_VERSION
 
 
 class FakeContext:
@@ -21,6 +23,17 @@ class FakeContext:
 
     def register_command(self, name, handler, **kwargs):
         self.commands[name] = handler
+
+
+def test_plugin_version_matches_manifest_and_pyproject():
+    root = Path(__file__).resolve().parents[1]
+    plugin_yaml = (root / "plugin.yaml").read_text(encoding="utf-8")
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    yaml_version = re.search(r"^version:\s*(\S+)", plugin_yaml, re.MULTILINE)
+    toml_version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+    assert yaml_version is not None
+    assert toml_version is not None
+    assert PLUGIN_VERSION == yaml_version.group(1) == toml_version.group(1)
 
 
 def test_registers_tools_skill_and_command():
