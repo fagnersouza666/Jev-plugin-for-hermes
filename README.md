@@ -18,6 +18,9 @@ The first intended consumer is the existing price-monitor pipeline. The plugin o
 - Python 3.11+ (the implementation uses only the standard library).
 - A TypeSafe API key in `TYPESAFE_API_KEY` when the plugin is enabled.
 
+Agent working notes for this repository live in [`AGENTS.md`](AGENTS.md). The
+runtime playbook for calling Jev from Hermes is `skills/jev-playbook/SKILL.md`.
+
 ## Development
 
 ```bash
@@ -26,6 +29,8 @@ python -m pytest -q
 ```
 
 The test suite is offline and never sends the key or state to the network.
+
+Local caches, virtualenvs, coverage reports, Hermes runtime dirs (`.hermes/`, `plugin-data/`), and secret files (`.env`, `.op.env`, `*.pem`, `*.key`, `auth.json`) are gitignored. Keep `TYPESAFE_API_KEY` out of the repository. Use `.env.example` only for dummy keys.
 
 Validate against the installed Hermes plugin loader:
 

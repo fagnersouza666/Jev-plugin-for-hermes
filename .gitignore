@@ -1,6 +1,73 @@
+# Byte-compiled / optimized
 __pycache__/
+*.py[codz]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets and local environment (never commit TYPESAFE_API_KEY)
+.env
+.env.*
+!.env.example
+.envrc
+.op.env
+*.pem
+*.key
+*.p12
+*.pfx
+auth.json
+credentials.json
+
+# Test / linter / coverage
 .pytest_cache/
 .ruff_cache/
-.venv/
-.env
-*.py[cod]
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.tox/
+.nox/
+
+# Packaging (pyproject.toml / pip / uv / hatch)
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+wheels/
+share/python-wheels/
+.installed.cfg
+.python-version
+.pdm-python
+.pdm-build/
+
+# Hermes local runtime (plugins doctor / agent operating in this checkout)
+.hermes/
+plugin-data/
+
+# Editors and OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.directory
+
+# Logs and scratch
+*.log
+tmp/
+temp/
+.cache/
