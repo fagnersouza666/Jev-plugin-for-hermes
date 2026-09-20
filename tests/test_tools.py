@@ -189,6 +189,36 @@ def test_price_assess_nests_allowlisted_payload_without_nested_ok(monkeypatch):
     assert "ok" not in result["assessment"]
 
 
+def test_json_output_rejects_nan_values(monkeypatch):
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        @classmethod
+        def from_settings(cls, settings, **kwargs):
+            return cls(**kwargs)
+
+        def evaluate(self, **kwargs):
+            return {
+                "answers": {"q": {"type": "noul", "noul": float("nan")}},
+                "model": "jev-latest",
+            }
+
+    monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", FakeClient)
+    evaluate, _assess = make_handlers({})
+    result = json.loads(
+        evaluate(
+            {
+                "state": "hello",
+                "questions": {"q": {"type": "noul", "instructions": "Is this true?"}},
+            }
+        )
+    )
+    assert result["ok"] is False
+    assert result["error"]["code"] == "internal_error"
+    assert "nan" not in result["error"]["message"].lower()
+
+
 def test_price_assess_internal_error_does_not_leak_exception_text(monkeypatch):
     class BrokenClient:
         def __init__(self, **kwargs):

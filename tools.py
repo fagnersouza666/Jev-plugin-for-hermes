@@ -75,7 +75,7 @@ _PRICE_QUESTIONS = {
 
 
 def _json(payload: Mapping[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
 def _error(code: str, message: str, **extra: Any) -> str:

@@ -3,15 +3,15 @@ from urllib.error import HTTPError
 
 import pytest
 from jev_plugin_for_hermes.client import (
+    _MAX_RESPONSE_BYTES,
     JevClient,
     JevConfigurationError,
     JevHTTPError,
     JevProtocolError,
     JevTransportError,
     JevValidationError,
-    _MAX_RESPONSE_BYTES,
-    _NoRedirect,
     _default_opener,
+    _NoRedirect,
     build_request,
 )
 
@@ -377,3 +377,138 @@ def test_build_request_drops_extra_keys_from_noul():
         20000,
     )
     assert request.questions["q"] == {"type": "noul", "instructions": "True?"}
+
+
+@pytest.mark.parametrize(
+    ("answers", "questions"),
+    [
+        ({"answers": {"q": {"type": "noul"}}}, {"q": {"type": "noul", "instructions": "True?"}}),
+        ({"answers": {"q": {"type": "noul", "noul": 1.5}}}, {"q": {"type": "noul", "instructions": "True?"}}),
+        ({"answers": {"q": {"type": "noul", "noul": -0.1}}}, {"q": {"type": "noul", "instructions": "True?"}}),
+        (
+            {"answers": {"q": {"type": "noul", "noul": 0.5, "extra": "x"}}},
+            {"q": {"type": "noul", "instructions": "True?"}},
+        ),
+        (
+            {
+                "answers": {
+                    "kind": {
+                        "type": "choice",
+                        "choice": "missing",
+                    }
+                }
+            },
+            {
+                "kind": {
+                    "type": "choice",
+                    "instructions": "Pick",
+                    "criteria": {"a": "Option A"},
+                }
+            },
+        ),
+        (
+            {
+                "answers": {
+                    "risk": {
+                        "type": "score",
+                        "score": 3,
+                    }
+                }
+            },
+            {
+                "risk": {
+                    "type": "score",
+                    "instructions": "Rate",
+                    "criteria": ["low", "medium", "high"],
+                }
+            },
+        ),
+    ],
+)
+def test_parse_answers_rejects_invalid_semantic_values(answers, questions):
+    def opener(*args, **kwargs):
+        return FakeResponse(answers)
+
+    client = JevClient(api_key="x", opener=opener)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(state="hello", questions=questions)
+
+
+def test_parse_answers_rejects_nan_in_response_body():
+    raw = b'{"answers":{"q":{"type":"noul","noul":NaN}}}'
+
+    def opener(*args, **kwargs):
+        return FakeResponse({}, raw=raw)
+
+    client = JevClient(api_key="x", opener=opener)
+    with pytest.raises(JevProtocolError, match="invalid JSON"):
+        client.evaluate(
+            state="hello",
+            questions={"q": {"type": "noul", "instructions": "True?"}},
+        )
+
+
+def test_parse_answers_rejects_invalid_model_and_usage():
+    def opener(*args, **kwargs):
+        return FakeResponse(
+            {
+                "model": 123,
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(
+            state="hello",
+            questions={"q": {"type": "noul", "instructions": "True?"}},
+        )
+
+    def opener_usage(*args, **kwargs):
+        return FakeResponse(
+            {
+                "usage": ["not", "a", "dict"],
+                "answers": {"q": {"type": "noul", "noul": 0.5}},
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener_usage)
+    with pytest.raises(JevProtocolError, match="answers object"):
+        client.evaluate(
+            state="hello",
+            questions={"q": {"type": "noul", "instructions": "True?"}},
+        )
+
+
+def test_parse_answers_returns_sanitized_allowlisted_payload():
+    def opener(*args, **kwargs):
+        return FakeResponse(
+            {
+                "ok": False,
+                "error": {"code": "vendor", "message": "ignored"},
+                "model": "jev-latest",
+                "usage": {"input_tokens": 1},
+                "answers": {
+                    "kind": {"type": "choice", "choice": "a"},
+                },
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener)
+    result = client.evaluate(
+        state="hello",
+        questions={
+            "kind": {
+                "type": "choice",
+                "instructions": "Pick",
+                "criteria": {"a": "Option A"},
+            }
+        },
+    )
+    assert result == {
+        "answers": {"kind": {"type": "choice", "choice": "a"}},
+        "model": "jev-latest",
+        "usage": {"input_tokens": 1},
+    }
+    assert "ok" not in result
+    assert "error" not in result

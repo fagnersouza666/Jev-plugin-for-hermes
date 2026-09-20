@@ -7,6 +7,7 @@ That keeps installation light and makes the request/response contract explicit a
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import urllib.request
@@ -285,22 +286,97 @@ def _post_json(
     return status, raw
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("invalid JSON constant")
+
+
+def _validate_answer_body(name: str, body: Any, expected_question: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise JevProtocolError("Jev API response did not contain an answers object")
+
+    kind = expected_question["type"]
+    if body.get("type") != kind:
+        raise JevProtocolError("Jev API response did not contain an answers object")
+
+    if kind == "noul":
+        if set(body.keys()) != {"type", "noul"}:
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        value = body["noul"]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        if not math.isfinite(value) or value < 0 or value > 1:
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        return {"type": "noul", "noul": value}
+
+    if kind == "choice":
+        if set(body.keys()) != {"type", "choice"}:
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        criteria = expected_question["criteria"]
+        choice = body["choice"]
+        if not isinstance(choice, str) or choice not in criteria:
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        return {"type": "choice", "choice": choice}
+
+    if kind == "score":
+        if set(body.keys()) != {"type", "score"}:
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        rubric = expected_question["criteria"]
+        value = body["score"]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        if not math.isfinite(value) or value < 0 or value > len(rubric) - 1:
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        return {"type": "score", "score": value}
+
+    raise JevProtocolError("Jev API response did not contain an answers object")
+
+
 def _parse_answers(raw: bytes, status: int, expected: Mapping[str, Any]) -> dict[str, Any]:
     if status < 200 or status >= 300:
         raise JevHTTPError(status)
     if len(raw) > _MAX_RESPONSE_BYTES:
         raise JevProtocolError("Jev API response exceeded the size limit")
     try:
-        decoded = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        decoded = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise JevProtocolError("Jev API returned invalid JSON") from exc
-    answers = decoded.get("answers") if isinstance(decoded, dict) else None
+    if not isinstance(decoded, dict):
+        raise JevProtocolError("Jev API response did not contain an answers object")
+
+    answers = decoded.get("answers")
     if not isinstance(answers, dict) or set(answers) != set(expected):
         raise JevProtocolError("Jev API response did not contain an answers object")
-    for name, body in answers.items():
-        if not isinstance(body, dict) or body.get("type") != expected[name]["type"]:
+
+    validated_answers = {
+        name: _validate_answer_body(name, body, expected[name]) for name, body in answers.items()
+    }
+    result: dict[str, Any] = {"answers": validated_answers}
+
+    if "model" in decoded:
+        model = decoded["model"]
+        if not isinstance(model, str) or not model.strip():
             raise JevProtocolError("Jev API response did not contain an answers object")
-    return decoded
+        result["model"] = model.strip()
+
+    if "usage" in decoded:
+        usage = decoded["usage"]
+        if not isinstance(usage, dict):
+            raise JevProtocolError("Jev API response did not contain an answers object")
+        try:
+            json.dumps(usage, **_JSON_DUMP_KWARGS)
+        except (TypeError, ValueError) as exc:
+            raise JevProtocolError("Jev API response did not contain an answers object") from exc
+        result["usage"] = usage
+
+    try:
+        json.dumps(result, **_JSON_DUMP_KWARGS)
+    except (TypeError, ValueError) as exc:
+        raise JevProtocolError("Jev API response did not contain an answers object") from exc
+
+    return result
 
 
 class JevClient:
