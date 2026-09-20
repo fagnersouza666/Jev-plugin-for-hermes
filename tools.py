@@ -41,11 +41,11 @@ _PRICE_QUESTIONS = {
     },
     "seller_risk": {
         "type": "score",
-        "instructions": "How risky is the seller or listing for a purchase decision?",
+        "instructions": "How trustworthy is the seller or listing for a purchase decision?",
         "criteria": [
-            "No meaningful risk signals and strong evidence",
-            "Some uncertainty or moderate risk signals",
             "High risk signals, weak evidence, or suspicious seller",
+            "Some uncertainty or moderate risk signals",
+            "No meaningful risk signals and strong evidence",
         ],
     },
     "deal_quality": {
@@ -101,9 +101,14 @@ def _call_jev(
 ) -> str:
     try:
         response = client.evaluate(state=state, questions=questions, model=model)
+        payload: dict[str, Any] = {"answers": response["answers"]}
+        if "model" in response:
+            payload["model"] = response["model"]
+        if "usage" in response:
+            payload["usage"] = response["usage"]
         if result_key is None:
-            return _json({"ok": True, **response})
-        return _json({"ok": True, result_key: response})
+            return _json({"ok": True, **payload})
+        return _json({"ok": True, result_key: payload})
     except JevError as exc:
         code = "configuration" if isinstance(exc, JevConfigurationError) else "jev_error"
         return _error(code, str(exc))
