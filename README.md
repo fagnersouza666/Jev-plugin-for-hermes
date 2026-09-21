@@ -317,17 +317,29 @@ cannot overwrite them.
 ## Development
 
 ```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install --upgrade pip "setuptools>=83.0.0"
+pip install -e '.[dev]'
+bash scripts/install-git-hooks.sh
 python -m pytest -q
 python -m ruff check .
-pip install -e '.[dev]' pip-audit==2.10.1 && python -m pip_audit
+bash scripts/pip-audit.sh
 gitleaks detect --source . --verbose --redact
 TYPESAFE_API_KEY=test-hermes-plugin-key \
   hermes plugins doctor "$PWD" --ci
 ```
 
+`scripts/pip-audit.sh` is the same gate GitHub Actions runs: it upgrades
+`setuptools` to at least 83.0.0 (PYSEC-2026-3447) and then
+`python -m pip_audit --skip-editable`. Skipping the editable install of this
+plugin is expected. After `install-git-hooks.sh`, that script also runs on
+every `git commit` via `.githooks/pre-commit`.
+
 CI runs the pytest, ruff, pip-audit, and gitleaks steps on every push and pull
 request (see `.github/workflows/ci.yml`). The test suite is **offline** and
-never sends the key or state to the network.
+never sends the key or state to the network. `pip-audit` is a separate
+networked gate and must pass locally before a commit.
 
 Local caches, virtualenvs, coverage reports, Hermes runtime dirs (`.hermes/`,
 `plugin-data/`), and secret files (`.env`, `.op.env`, `*.pem`, `*.key`, `*.p12`,
@@ -344,6 +356,8 @@ tools.py                     # handlers + handle_jev (never raise into the agent
 client.py                    # PluginSettings, stdlib HTTPS client, request validation
 skills/jev-playbook/SKILL.md
 tests/                       # offline pytest
+scripts/pip-audit.sh         # same pip-audit gate as CI / pre-commit
+.githooks/pre-commit         # runs scripts/pip-audit.sh
 docs/development.md          # extra contributor notes
 ```
 

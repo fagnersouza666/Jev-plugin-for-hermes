@@ -24,6 +24,8 @@
 
 All open findings from this snapshot (BUG-012 through BUG-018) are **resolved** in the current tree. Handlers and the hook fail closed on missing keys, HTTP errors, malformed answer bodies, contradictory pre-tool decisions, and oversized or mistyped optional vendor fields.
 
+Incremental scan 20/09/2026 (pip-audit / setuptools gate): `scripts/pip-audit.sh`, `scripts/install-git-hooks.sh`, `.githooks/pre-commit`, `tests/test_security_gate.py`, `pyproject.toml`, `.github/workflows/ci.yml`. **0 findings.** `git config --local` only; venv-scoped pip; fail closed if the audit cannot run.
+
 Historical BUG-001 through BUG-011 (19/09/2026) stay **mitigated**. See the appendix.
 
 ---

@@ -135,12 +135,14 @@ if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1",
 
 **Referência:** OWASP A06:2021 — Vulnerable and Outdated Components
 
-**Correção aplicada:** GitHub Actions com dois jobs — `quality` (ruff + pytest) e `security` (pip-audit 2.10.1 sobre extras dev + gitleaks CLI). Documentado em README e `docs/development.md`.
+**Correção aplicada:** GitHub Actions com dois jobs — `quality` (ruff + pytest) e `security` (`scripts/pip-audit.sh` + gitleaks CLI). O script sobe `setuptools>=83.0.0` (PYSEC-2026-3447) e executa `python -m pip_audit --skip-editable`. O mesmo script roda no pre-commit após `bash scripts/install-git-hooks.sh`. Documentado em README e `docs/development.md`.
 
 **Comandos locais equivalentes:**
 
 ```bash
-pip install -e '.[dev]' pip-audit==2.10.1 && python -m pip_audit
+pip install --upgrade pip "setuptools>=83.0.0"
+pip install -e '.[dev]'
+bash scripts/pip-audit.sh
 gitleaks detect --source . --verbose --redact
 python -m pytest -q
 python -m ruff check .
@@ -152,7 +154,7 @@ python -m ruff check .
 
 | Ecossistema | Runtime | Dev | Status |
 |-------------|---------|-----|--------|
-| Python plugin | **0 deps** (`pyproject.toml`) | pytest, ruff | Runtime N/A; dev auditado em CI (`pip-audit`) |
+| Python plugin | **0 deps** (`pyproject.toml`) | pytest, ruff, pip-audit, setuptools>=83.0.0 | Runtime N/A; venv/dev auditado em CI e no pre-commit (`scripts/pip-audit.sh`) |
 
 **Conclusão A06:** risco baixo em produção (stdlib only). Auditar dev extras periodicamente.
 
@@ -249,7 +251,7 @@ Consulte nota no topo de [`docs/bug-report.md`](bug-report.md).
 
 1. **Manter** validação semântica de answers (implementada) com testes de regressão.
 2. **Sincronizar** `docs/bug-report.md` com status resolvido (nota adicionada).
-3. **Manter** CI (pytest, ruff, pip-audit, gitleaks) e documentação de `api_url` como trust boundary.
+3. **Manter** CI e o pre-commit (pytest, ruff, `scripts/pip-audit.sh`, gitleaks) e documentação de `api_url` como trust boundary.
 4. **Consumidores:** nunca tratar Jev como autorização; gates determinísticos antes de alert/buy.
 
 ---

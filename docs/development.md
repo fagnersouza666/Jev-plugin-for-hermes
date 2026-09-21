@@ -7,13 +7,24 @@ should stay in the repository.
 ## Tests
 
 ```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install --upgrade pip "setuptools>=83.0.0"
+pip install -e '.[dev]'
+bash scripts/install-git-hooks.sh
 python -m pytest -q
 python -m ruff check .
-pip install -e '.[dev]' pip-audit==2.10.1 && python -m pip_audit
+bash scripts/pip-audit.sh
 gitleaks detect --source . --verbose --redact
 TYPESAFE_API_KEY=test-hermes-plugin-key \
   hermes plugins doctor "$PWD" --ci
 ```
+
+`scripts/pip-audit.sh` is the GitHub Actions pip-audit gate. It upgrades
+`setuptools>=83.0.0` (PYSEC-2026-3447 / CVE-2026-59890) then runs
+`python -m pip_audit --skip-editable`. The `--skip-editable` line for this
+plugin is informational, not a failure. `bash scripts/install-git-hooks.sh`
+sets `core.hooksPath=.githooks` (`git config --local`) so that gate also runs before every commit.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs pytest, ruff, pip-audit, and
 gitleaks on every push and pull request.

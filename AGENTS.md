@@ -148,17 +148,24 @@ score = better purchase signal).
 ## Python and tests
 
 - Python ≥ 3.11, `from __future__ import annotations`, ruff `target-version = py311`,
-  line length 120. Dev extras: `pytest>=8,<10` and `ruff>=0.9,<1`.
+ line length 120. Dev extras: `pytest>=9.1.1,<10`, `ruff>=0.16.8,<1`,
+ `pip-audit>=2.10.1,<3`, and `setuptools>=83.0.0` (PYSEC-2026-3447).
 - Tests stay **offline**. Inject `opener` on `JevClient` or patch `JevClient` in
-  handlers. Never send `TYPESAFE_API_KEY`, state, or fixtures to the network.
+ handlers. Never send `TYPESAFE_API_KEY`, state, or fixtures to the network.
 - Package load: `tests/conftest.py` imports `__init__.py` as `jev_plugin_for_hermes`.
 - Assert behavior (payload shape, fail-closed codes, no transport when the key
-  is missing), not snapshots of incidental strings.
+ is missing), not snapshots of incidental strings.
+- **pip-audit before every commit.** `scripts/pip-audit.sh` is the same gate as
+ GitHub Actions (`python -m pip_audit --skip-editable` after upgrading
+ `setuptools>=83.0.0`). Enable it with `bash scripts/install-git-hooks.sh`
+ (`core.hooksPath=.githooks`). Do not commit if that script fails.
 
 ```bash
 python -m pytest -q
+python -m ruff check .
+bash scripts/pip-audit.sh
 TYPESAFE_API_KEY=test-hermes-plugin-key \
-  hermes plugins doctor "$PWD" --ci
+ hermes plugins doctor "$PWD" --ci
 ```
 
 `hermes plugins doctor` is a loader check (temp Hermes home). It is not a Jev
