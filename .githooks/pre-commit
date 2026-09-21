@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fail the commit unless the same pip-audit gate as CI is clean.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+exec "$ROOT/scripts/pip-audit.sh"
