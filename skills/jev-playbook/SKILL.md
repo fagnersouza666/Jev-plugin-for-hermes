@@ -1,19 +1,28 @@
 ---
 name: jev-playbook
 description: Use Jev for typed decisions in Hermes. Load this before routing or classifying evidence.
-version: 0.2.2
+version: 0.3.0
 ---
 
 # Jev Playbook for Hermes
 
-Use the namespaced tool `jev-plugin-for-hermes:jev_evaluate` when a decision can be expressed as typed questions over supplied evidence. Use `jev-plugin-for-hermes:jev_price_assess` for an e-commerce offer. The plugin also registers `pre_tool_call`, so every Hermes tool invocation is assessed before execution.
+Use the namespaced tool `jev-plugin-for-hermes:jev_evaluate` when a decision can be expressed as typed questions over supplied evidence. Use `jev-plugin-for-hermes:jev_price_assess` for an e-commerce offer. The registered `pre_tool_call` hook is a local no-op by default; operators must explicitly set `pre_tool_guard_enabled: true` when they want every Hermes tool invocation assessed by Jev before execution.
 
-The global hook is an advisory guard, not a replacement for Hermes policy. An `allow` result with reason code `no_issue` leaves normal execution and approvals unchanged; `review` or `deny` blocks the call before execution. Contradictory pairs such as `allow` + `destructive_change` are treated as malformed decisions and blocked. A failed assessment also blocks the call. Non-allow results include a bounded reason code such as `insufficient_context` or `deployment_or_release`; this is diagnostic context, not authorization.
+When enabled, the global hook is a fail-closed guard, not a replacement for Hermes policy. An `allow` result with reason code `no_issue` leaves normal execution and approvals unchanged; `review` or `deny` blocks the call before execution. Contradictory pairs such as `allow` + `destructive_change` are treated as malformed decisions and blocked. A failed assessment also blocks the call. Non-allow results include a bounded reason code such as `insufficient_context` or `deployment_or_release`; this is diagnostic context, not authorization. Keep the hook disabled for general-purpose sessions unless that latency and availability trade-off is intentional.
 
 ## Primitive selection
 
+Optional routing starts in observation mode and is independent of the guard.
+Skill/profile/recovery suggestions never override the user or authorize actions.
+Tool and search-result filters require explicit operator configuration. Catalogs
+come from settings, not filesystem discovery. Routing failures preserve Hermes'
+normal behavior. See `docs/routing.md` in the plugin for configuration contracts.
+
+The external cron gate may wake Hermes to investigate an eligible offer when Jev
+fails. Waking is not permission to buy, publish or send an alert.
+
 - `noul`: probability that one proposition is true. Example: “Does this listing exactly match the target product?”
-- `choice`: one category from a named set. Example: `ignore`, `record`, `manual_review`, or `alert`.
+- `choice`: one category from 1–255 named alternatives. Example: `ignore`, `record`, `manual_review`, or `alert`.
 - `score`: a continuous position on an ordered rubric. Supply criteria from worst to best.
   In `jev_price_assess`, a higher `seller_risk` score means a more trustworthy
   seller, not more risk.

@@ -10,6 +10,7 @@ from jev_plugin_for_hermes.client import (
     JevProtocolError,
     JevTransportError,
     JevValidationError,
+    PluginSettings,
     _default_opener,
     _NoRedirect,
     build_request,
@@ -137,6 +138,42 @@ def test_client_clamps_timeout_and_max_state_chars():
     client = JevClient(api_key="x", timeout=0.5, max_state_chars=10_000_000)
     assert client.timeout == 1.0
     assert client.max_state_chars == 200_000
+
+
+def test_pre_tool_guard_is_opt_in_and_requires_a_boolean():
+    assert PluginSettings.from_mapping({}).pre_tool_guard_enabled is False
+    assert PluginSettings.from_mapping({"pre_tool_guard_enabled": True}).pre_tool_guard_enabled is True
+    with pytest.raises(JevConfigurationError, match="must be a boolean"):
+        PluginSettings.from_mapping({"pre_tool_guard_enabled": "true"})
+
+
+@pytest.mark.parametrize("size", [182, 255, 256])
+def test_choice_alternative_limit_is_checked_before_transport(size):
+    calls = []
+    criteria = {f"s{i}": f"Skill {i}" for i in range(size)}
+
+    def opener(request, timeout):
+        calls.append(request)
+        return FakeResponse({"answers": {"rank": {"type": "choice", "choice": "s0",
+                             "probabilities": {key: 1 / size for key in criteria}}}})
+
+    client = JevClient(api_key="test-key", opener=opener)
+    questions = {"rank": {"type": "choice", "instructions": "Select a skill", "criteria": criteria}}
+    if size > 255:
+        with pytest.raises(JevValidationError, match="at most 255"):
+            client.evaluate(state="Request", questions=questions)
+        assert not calls
+    else:
+        assert len(client.evaluate(state="Request", questions=questions)["answers"]["rank"]["probabilities"]) == size
+        assert len(calls) == 1
+
+
+@pytest.mark.parametrize("key,limit", [("skills_catalog", 255), ("profiles_catalog", 254)])
+def test_catalog_limit_respects_choice_alternatives(key, limit):
+    catalog = [{"id": f"entry-{i}", "description": f"Entry {i}"} for i in range(limit)]
+    assert len(getattr(PluginSettings.from_mapping({key: catalog}), key)) == limit
+    with pytest.raises(JevConfigurationError):
+        PluginSettings.from_mapping({key: [*catalog, {"id": "overflow", "description": "Extra"}]})
 
 
 def test_client_sends_documented_payload_without_logging_secret():

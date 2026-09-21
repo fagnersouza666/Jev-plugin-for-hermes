@@ -293,7 +293,7 @@ def test_tool_call_guard_allows_a_clear_call(monkeypatch):
             }
 
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", FakeClient)
-    guard = make_tool_call_guard({})
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True})
     assert guard(tool_name="read_file", args={"path": "/tmp/example.txt"}) is None
     assert captured["state"]["tool_name"] == "read_file"
     assert captured["state"]["arguments"]["path"] == "/tmp/example.txt"
@@ -317,12 +317,12 @@ def test_make_tool_call_guard_uses_tighter_timeout_than_default_settings(monkeyp
             }
 
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", FakeClient)
-    guard = make_tool_call_guard({})
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True})
     assert guard(tool_name="read_file", args={}) is None
     assert captured["timeout_seconds"] == 25.0
 
     captured.clear()
-    guard = make_tool_call_guard({"timeout_seconds": 10})
+    guard = make_tool_call_guard({"timeout_seconds": 10, "pre_tool_guard_enabled": True})
     assert guard(tool_name="read_file", args={}) is None
     assert captured["timeout_seconds"] == 10.0
 
@@ -342,7 +342,7 @@ def test_tool_call_guard_blocks_contradictory_allow_and_reason(monkeypatch):
             }
 
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", FakeClient)
-    guard = make_tool_call_guard({})
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True})
     result = guard(tool_name="terminal", args={"command": "rm -rf ./data"})
     assert result["action"] == "block"
     assert "invalid pre-tool decision" in result["message"]
@@ -371,7 +371,7 @@ def test_tool_call_guard_escalates_review_and_deny_to_human(monkeypatch):
             }
 
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", FakeClient)
-    guard = make_tool_call_guard({})
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True})
     review = guard(tool_name="terminal", args={"command": "rm -rf ./build"})
     deny = guard(tool_name="write_file", args={"path": "out.txt", "content": "data"})
     assert review["action"] == "block"
@@ -393,7 +393,7 @@ def test_tool_call_guard_blocks_jev_failure_without_leaking_details(monkeypatch)
             raise RuntimeError("secret-token-leak")
 
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", BrokenClient)
-    guard = make_tool_call_guard({})
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True})
     result = guard(tool_name="terminal", args={"command": "pwd"})
     assert result["action"] == "block"
     assert "secret-token-leak" not in result["message"]
@@ -441,7 +441,7 @@ def test_hermes_guard_does_not_read_local_files(tmp_path, monkeypatch):
     script.write_text("#!/bin/bash\necho should-not-be-sent\n", encoding="utf-8")
     captured = {}
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", _allowing_client(captured))
-    guard = make_tool_call_guard({})
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True})
     assert guard(
         tool_name="Bash",
         args={"command": "./deploy-backend_test.sh"},
@@ -459,7 +459,7 @@ def test_codex_guard_attaches_cwd_script_excerpt(tmp_path, monkeypatch):
     )
     captured = {}
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", _allowing_client(captured))
-    guard = make_tool_call_guard({}, attach_local_files=True)
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True}, attach_local_files=True)
     assert guard(
         tool_name="Bash",
         args={"command": "./deploy-backend_test.sh"},
@@ -481,7 +481,7 @@ def test_codex_guard_skips_secrets_and_paths_outside_cwd(tmp_path, monkeypatch):
     outside.write_text("export AWS_SECRET_ACCESS_KEY=do-not-send\n", encoding="utf-8")
     captured = {}
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", _allowing_client(captured))
-    guard = make_tool_call_guard({}, attach_local_files=True)
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True}, attach_local_files=True)
     assert guard(
         tool_name="Bash",
         args={"command": "bash ok.sh .env ../secret.sh"},
@@ -501,7 +501,7 @@ def test_codex_guard_skips_symlink_pointing_outside_cwd(tmp_path, monkeypatch):
     (workspace / "run.sh").symlink_to(outside)
     captured = {}
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", _allowing_client(captured))
-    guard = make_tool_call_guard({}, attach_local_files=True)
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True}, attach_local_files=True)
     assert guard(
         tool_name="Bash",
         args={"command": "./run.sh"},
@@ -527,7 +527,7 @@ def test_tool_call_guard_invalid_reason_code_still_blocks(monkeypatch):
             }
 
     monkeypatch.setattr("jev_plugin_for_hermes.tools.JevClient", FakeClient)
-    guard = make_tool_call_guard({})
+    guard = make_tool_call_guard({"pre_tool_guard_enabled": True})
     result = guard(tool_name="Bash", args={"command": "./infra/scripts/deploy-backend_test.sh"})
     assert result["action"] == "block"
     assert "invalid" in result["message"].lower()

@@ -3,19 +3,22 @@ import re
 from pathlib import Path
 
 import jev_plugin_for_hermes as plugin
+import pytest
 from jev_plugin_for_hermes import schemas
 from jev_plugin_for_hermes.client import PLUGIN_VERSION
 
 
 class FakeContext:
-    def __init__(self):
+    def __init__(self, config=None):
         self.tools = {}
         self.skills = {}
         self.commands = {}
         self.hooks = {}
+        self.middleware = {}
+        self.config = config or {}
 
     def get_config(self, key, default=None):
-        return default
+        return self.config.get(key, default)
 
     def register_tool(self, name, toolset, schema, handler, **kwargs):
         self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler, **kwargs}
@@ -28,6 +31,9 @@ class FakeContext:
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
+
+    def register_middleware(self, name, callback):
+        self.middleware[name] = callback
 
 
 def test_plugin_version_matches_manifest_and_pyproject():
@@ -61,6 +67,37 @@ def test_registers_tools_skill_and_command():
 
     invalid = json.loads(ctx.commands["jev"]("{not json"))
     assert invalid["error"]["code"] == "invalid_json"
+
+
+def test_pre_tool_guard_is_a_local_noop_until_explicitly_enabled():
+    ctx = FakeContext()
+    plugin.register(ctx)
+
+    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={"command": "pwd"}) is None
+
+
+@pytest.mark.parametrize("config, hooks, middleware", [
+    ({}, {"pre_tool_call"}, set()),
+    ({"skills_mode": "observe"}, {"pre_tool_call", "pre_llm_call"}, set()),
+    ({"tools_mode": "observe"}, {"pre_tool_call", "pre_llm_call"}, {"llm_request"}),
+    ({"results_mode": "filter"}, {"pre_tool_call", "pre_llm_call", "transform_tool_result"}, set()),
+    ({"recovery_mode": "observe"}, {"pre_tool_call", "pre_llm_call", "post_tool_call"}, set()),
+    ({"recovery_mode": "suggest"}, {"pre_tool_call", "pre_llm_call", "post_tool_call"}, {"llm_request"}),
+])
+def test_routing_registration_is_conditional_and_independent_of_guard(config, hooks, middleware):
+    ctx = FakeContext(config)
+    plugin.register(ctx)
+    assert set(ctx.hooks) == hooks
+    assert set(ctx.middleware) == middleware
+    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={"command": "pwd"}) is None
+
+
+def test_older_context_without_middleware_keeps_routing_hooks(caplog):
+    ctx = FakeContext({"skills_mode": "observe", "tools_mode": "observe"})
+    ctx.register_middleware = None
+    plugin.register(ctx)
+    assert "pre_llm_call" in ctx.hooks
+    assert "middleware_unavailable" in caplog.text
 
 
 def test_jev_command_delegates_to_evaluate_handler(monkeypatch):

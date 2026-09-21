@@ -52,7 +52,8 @@ valid Python identifier.
    `requests`, or a vendor client. The HTTP contract must stay explicit in
    `client.py`.
 2. **No import-time network, filesystem writes, or secret I/O.** API calls happen
-   only when a registered tool, `/jev`, or the `pre_tool_call` hook runs.
+   only when a registered tool, `/jev`, enabled runtime callback, or external
+   operator-invoked cron gate runs.
 3. **No privileged capabilities.** Do not declare or use `filesystem`,
    `subprocess`, `browser`, MCP, or tool override. The `pre_tool_call` lifecycle
    hook is intentional and limited to a bounded, sanitized Jev assessment; it
@@ -86,6 +87,18 @@ valid Python identifier.
 
 ## Registration contract
 
+Optional advisory routing uses `routing.py` and settings validated through
+`PluginSettings.from_ctx`. Modes default to off; observe cannot mutate model
+context, schemas, or results. Register `pre_llm_call`, `post_tool_call`,
+`transform_tool_result` and `llm_request` only as needed. Errors discard advice
+and preserve Hermes behavior; this does not change the guard's fail-closed policy.
+Catalogs are operator-supplied settings, never discovered from local files.
+See `docs/routing.md` for contracts, limits and rollout.
+
+`cron_gate.py` is a separate operator CLI reading bounded JSON from stdin, never
+a registered tool. It cannot execute collectors/jobs. Preserve `_PRICE_QUESTIONS`.
+Invalid input never wakes; assessment failures on eligible input wake for review.
+
 `register(ctx)` in `__init__.py` is the only entry point Hermes loads.
 
 - Tools: `ctx.register_tool(name, toolset="jev", schema=..., handler=..., description=...)`.
@@ -109,9 +122,9 @@ valid Python identifier.
 `plugin.yaml` must stay aligned with code:
 
 - `provides_tools`: `jev_evaluate`, `jev_price_assess`
-- `provides_hooks`: `pre_tool_call`
+- `provides_hooks`: `pre_tool_call`, `pre_llm_call`, `post_tool_call`, `transform_tool_result`
 - `requires_env`: `TYPESAFE_API_KEY` with `secret: true`
-- `config_schema`: `api_url`, `default_model`, `timeout_seconds`, `max_state_chars`
+- `config_schema`: client settings, `pre_tool_guard_enabled`, and documented routing settings
 - `kind: standalone`, `manifest_version: 2`
 
 Settings are read via `PluginSettings.from_ctx(ctx)` in `client.py` (defaults
@@ -132,7 +145,7 @@ one `JevClient.from_settings(...)` per registration. Users set the key with
 Question types:
 
 - `noul`: probability a proposition is true. Needs `instructions`.
-- `choice`: one named category. `criteria` is a non-empty `{name: description}` object.
+- `choice`: one named category. `criteria` has 1–255 `{name: description}` alternatives.
 - `score`: position on an ordered rubric. `criteria` is a list of ≥ 2 strings,
   worst to best.
 

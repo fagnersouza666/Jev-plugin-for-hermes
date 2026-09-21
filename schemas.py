@@ -17,7 +17,8 @@ _QUESTION = {
         "instructions": {"type": "string"},
         "criteria": {
             "anyOf": [
-                {"type": "object"},
+                {"type": "object", "minProperties": 1, "maxProperties": 255,
+                 "description": "Choice alternatives: 1–255 names mapped to descriptions."},
                 {"type": "array", "items": {"type": "string"}},
             ]
         },

@@ -1,5 +1,5 @@
 name: jev-plugin-for-hermes
-version: 0.2.2
+version: 0.3.0
 manifest_version: 2
 api_version: 1
 kind: standalone
@@ -21,6 +21,9 @@ provides_tools:
   - jev_price_assess
 provides_hooks:
   - pre_tool_call
+  - pre_llm_call
+  - post_tool_call
+  - transform_tool_result
 config_schema:
   api_url:
     type: str
@@ -38,3 +41,47 @@ config_schema:
     type: int
     default: 20000
     description: "Maximum serialized state size sent to Jev"
+  pre_tool_guard_enabled:
+    type: bool
+    default: false
+    description: "Opt in to fail-closed Jev assessment before every Hermes tool call"
+  skills_mode:
+    type: str
+    default: "off"
+    description: "Skill routing: off, observe, suggest"
+  tools_mode:
+    type: str
+    default: "off"
+    description: "Function schema routing: off, observe, filter"
+  results_mode:
+    type: str
+    default: "off"
+    description: "Search result routing: off, observe, filter"
+  profiles_mode:
+    type: str
+    default: "off"
+    description: "Profile routing: off, observe, suggest"
+  recovery_mode:
+    type: str
+    default: "off"
+    description: "Recovery advice: off, observe, suggest"
+  skills_catalog:
+    type: list
+    default: []
+    description: "Up to 255 available skills: id, description, optional details; no file discovery"
+  profiles_catalog:
+    type: list
+    default: []
+    description: "Up to 254 available profiles: id, description, optional details; reserves keep-current option"
+  essential_tools:
+    type: list
+    default: []
+    description: "Exact tool names that filtering must always preserve"
+  routing_budget_seconds:
+    type: float
+    default: 25.0
+    description: "Shared Jev evaluation budget per turn, clamped 1–25 seconds"
+  routing_threshold:
+    type: float
+    default: 0.7
+    description: "Relevance/applicability threshold, clamped 0–1; calibrate before filtering"

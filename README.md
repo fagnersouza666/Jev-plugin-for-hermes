@@ -2,8 +2,17 @@
 
 Standalone [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin
 that exposes [TypeSafe Jev](https://console.typesafe.ai) (System One) as typed
-decision tools, a namespaced skill, a `/jev` command, and a `pre_tool_call`
-guard.
+decision tools, a namespaced skill, a `/jev` command, and an optional
+`pre_tool_call` guard.
+
+Choice probability maps are bounded by the alternatives supplied in the request,
+including catalogs larger than 64 entries, up to 255 Choice alternatives. Unknown
+alternatives are rejected; score metadata and the global response-size limit
+retain their existing bounds.
+
+Optional [advisory routing](docs/routing.md) has independent `skills_mode`,
+`tools_mode`, `results_mode`, `profiles_mode`, and `recovery_mode` settings.
+All default to `off`; start with `observe` before activating suggestions or filters.
 
 The plugin evaluates evidence you already have and returns
 `{ "ok": true, ... }` or `{ "ok": false, "error": ... }`. It does not buy,
@@ -25,9 +34,10 @@ Typical jobs:
 - Ask a yes/no-style probability (`noul`), pick one named category (`choice`),
   or place an item on an ordered rubric (`score`).
 - Smoke-test a Jev payload from the session with `/jev`.
-- Once the plugin is enabled, assess **every** Hermes tool call before it
-  runs, so a `review` / `deny` from Jev can block the call. That assessment
-  is evidence for Hermes' normal policy, not a replacement for it.
+- Optionally assess **every** Hermes tool call before it runs, so a `review` /
+  `deny` from Jev can block the call. This fail-closed guard is disabled by
+  default because it adds latency and makes Jev availability part of every
+  Hermes tool call.
 
 The first intended consumer is a price-monitor pipeline. Numeric thresholds,
 identity checks, freshness, seller allowlists, alerting, and human review stay
@@ -63,12 +73,14 @@ At runtime Hermes namespaces tools and the skill as
    directory only if `jev-plugin-for-hermes` is enabled and
    `TYPESAFE_API_KEY` is present.
 2. `register(ctx)` builds one `JevClient` from plugin settings and wires the
-   two tools, the skill, `/jev`, and the hook.
+   two tools, the skill, `/jev`, and the hook. The hook is a local no-op unless
+   explicitly enabled.
 3. When the model calls `jev-plugin-for-hermes:jev_evaluate` or
    `jev-plugin-for-hermes:jev_price_assess`, the handler validates the
    arguments, POSTs JSON to the configured TypeSafe endpoint over HTTPS, and
    returns allowlisted fields inside `{ "ok": true, ... }`.
-4. Before **any** Hermes tool runs (not only Jev tools), `pre_tool_call` sends
+4. When `pre_tool_guard_enabled` is true, before **any** Hermes tool runs (not
+   only Jev tools), `pre_tool_call` sends
    a bounded, sanitized preview of the tool name and arguments to Jev.
    `allow` with reason code `no_issue` leaves Hermes' normal approval path
    unchanged. `review`, `deny`, provider failures, and contradictory decisions
@@ -77,8 +89,11 @@ At runtime Hermes namespaces tools and the skill as
    error and does not call the API.
 
 There are no import-time network calls, no credential persistence in this
-repo, and no irreversible actions. Network happens only when a tool, `/jev`,
-or the hook runs. Each of those is one outbound HTTPS POST.
+repo, and no irreversible actions. Each tool, `/jev`, or enabled guard assessment
+makes one outbound HTTPS POST. Optional routing and the external cron gate may
+make multiple requests within their shared evaluation budget. Routing sends the
+redacted request, recent context, configured catalog, or selected evidence fields
+to TypeSafe; observation mode also makes these requests.
 
 The hook is an opt-in cost and privacy trade-off: every tool call adds a
 synchronous round trip and sends a redacted preview to TypeSafe. Common
@@ -166,9 +181,10 @@ hermes plugins enable jev-plugin-for-hermes
 You can also toggle plugins interactively with `hermes plugins`, or add the
 id under `plugins.enabled` in `~/.hermes/config.yaml`.
 
-Enabling the plugin also registers `pre_tool_call`. After that, every Hermes
-tool invocation is assessed (one HTTPS POST per call) until you disable the
-plugin.
+Enabling the plugin registers a local no-op `pre_tool_call` hook. To opt in to
+remote assessment, set `pre_tool_guard_enabled: true` in the plugin settings.
+While enabled, every Hermes tool invocation is assessed (one HTTPS POST per
+call).
 
 If the plugin is enabled without a key, Hermes should gate it as missing its
 declared environment requirement.
@@ -210,8 +226,13 @@ plugins:
 | `default_model` | `jev-latest` | Pin a tested version (for example `jev-1.13.0`) after calibration |
 | `timeout_seconds` | `30.0` | Clamped once to 1–600 for tools and `/jev`; the `pre_tool_call` hook uses `min(timeout_seconds, 25)` so the Jev call finishes before Hermes' default 30s hook callback timeout |
 | `max_state_chars` | `20000` | Clamped once to 256–200000 |
+| `pre_tool_guard_enabled` | `false` | Opt in to fail-closed Jev assessment before every Hermes tool call; leave off for ordinary general-purpose sessions |
 
 Handlers share one `JevClient.from_settings(...)` instance per registration.
+
+For the first routing rollout, configure `skills_mode: observe` with an explicit
+`skills_catalog`, then switch to `suggest` after reviewing decisions. See the
+[complete configuration example and routing modes](docs/routing.md#configuration-example).
 
 ### 8. Verify the loader (no TypeSafe call)
 
@@ -273,7 +294,7 @@ Independent questions belong in one `jev_evaluate` call. State must be factual,
 compact, JSON-compatible evidence. Jev does not retrieve data.
 
 - **`noul`**: probability that a proposition is true. Requires `instructions`.
-- **`choice`**: one named category. `criteria` is a non-empty `{name: description}` object.
+- **`choice`**: one named category. `criteria` maps 1–255 names to descriptions.
 - **`score`**: position on an ordered rubric. `criteria` is a list of at least two strings, worst to best.
 
 Question names: `^[A-Za-z][A-Za-z0-9_-]{0,63}$`.

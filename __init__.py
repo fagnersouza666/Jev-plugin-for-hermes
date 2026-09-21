@@ -1,7 +1,7 @@
 """Jev integration for Hermes Agent.
 
 This is a standalone Hermes native plugin. It intentionally has no import-time network activity;
-all API calls happen only when a registered tool or slash command is invoked.
+API calls happen only in invoked tools, slash commands, or enabled runtime callbacks.
 """
 
 from __future__ import annotations
@@ -12,10 +12,12 @@ from typing import Any
 if __package__:
     from . import schemas, tools
     from .client import PluginSettings
+    from .routing import register_routing
 else:  # pragma: no cover - pytest imports the native plugin root as a plain module
     import schemas  # type: ignore[no-redef]
     import tools  # type: ignore[no-redef]
     from client import PluginSettings  # type: ignore[no-redef]
+    from routing import register_routing
 
 
 def _settings(ctx: Any) -> PluginSettings:
@@ -23,7 +25,7 @@ def _settings(ctx: Any) -> PluginSettings:
 
 
 def register(ctx: Any) -> None:
-    """Register tools, the explicit skill, and the optional ``/jev`` command."""
+    """Register tools, skill, command, guard, and configured advisory callbacks."""
     settings = _settings(ctx)
     evaluate, price_assess = tools.make_handlers(settings)
     tool_call_guard = tools.make_tool_call_guard(settings)
@@ -42,6 +44,7 @@ def register(ctx: Any) -> None:
         description=schemas.JEV_PRICE_ASSESS["description"],
     )
     ctx.register_hook("pre_tool_call", tool_call_guard)
+    register_routing(ctx, settings)
 
     skill_path = Path(__file__).parent / "skills" / "jev-playbook" / "SKILL.md"
     ctx.register_skill(

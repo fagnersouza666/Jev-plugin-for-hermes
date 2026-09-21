@@ -12,16 +12,21 @@ import os
 import re
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request
 
+try:
+    from .routing_config import MAX_CHOICE_OPTIONS, CatalogEntry, parse_routing
+except ImportError:  # pragma: no cover - native plugin direct import
+    from routing_config import MAX_CHOICE_OPTIONS, CatalogEntry, parse_routing
+
 DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 DEFAULT_API_KEY_ENV = "TYPESAFE_API_KEY"
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.3.0"
 _QUESTION_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _ALLOWED_TYPES = {"noul", "choice", "score"}
 _TIMEOUT_MIN = 1.0
@@ -69,6 +74,17 @@ class PluginSettings:
     default_model: str = DEFAULT_MODEL
     timeout_seconds: float = 30.0
     max_state_chars: int = 20_000
+    pre_tool_guard_enabled: bool = False
+    skills_mode: str = "off"
+    tools_mode: str = "off"
+    results_mode: str = "off"
+    profiles_mode: str = "off"
+    recovery_mode: str = "off"
+    skills_catalog: tuple[CatalogEntry, ...] = ()
+    profiles_catalog: tuple[CatalogEntry, ...] = ()
+    essential_tools: tuple[str, ...] = ()
+    routing_budget_seconds: float = 25.0
+    routing_threshold: float = 0.7
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any] | None = None) -> PluginSettings:
@@ -81,26 +97,32 @@ class PluginSettings:
 
         api_url = data.get("api_url", DEFAULT_ENDPOINT)
         default_model = data.get("default_model", DEFAULT_MODEL)
+        pre_tool_guard_enabled = data.get("pre_tool_guard_enabled", False)
         if not isinstance(api_url, str) or not isinstance(default_model, str):
             raise JevConfigurationError("plugin settings api_url and default_model must be strings")
+        if not isinstance(pre_tool_guard_enabled, bool):
+            raise JevConfigurationError("plugin setting pre_tool_guard_enabled must be a boolean")
+        try:
+            routing = parse_routing(data)
+        except ValueError as exc:
+            raise JevConfigurationError("invalid advisory routing settings") from exc
 
         return cls(
             api_url=api_url,
             default_model=default_model,
             timeout_seconds=max(_TIMEOUT_MIN, min(timeout, _TIMEOUT_MAX)),
             max_state_chars=max(_STATE_CHARS_MIN, min(max_state_chars, _STATE_CHARS_MAX)),
+            pre_tool_guard_enabled=pre_tool_guard_enabled,
+            **routing,
         )
 
     @classmethod
     def from_ctx(cls, ctx: Any) -> PluginSettings:
-        return cls.from_mapping(
-            {
-                "api_url": ctx.get_config("api_url", DEFAULT_ENDPOINT),
-                "default_model": ctx.get_config("default_model", DEFAULT_MODEL),
-                "timeout_seconds": ctx.get_config("timeout_seconds", 30.0),
-                "max_state_chars": ctx.get_config("max_state_chars", 20_000),
-            }
-        )
+        return cls.from_mapping({
+            field.name: ctx.get_config(field.name, list(field.default) if isinstance(field.default, tuple)
+                                       else field.default)
+            for field in fields(cls)
+        })
 
 
 @dataclass(frozen=True)
@@ -137,6 +159,8 @@ def _validate_choice_criteria(question: dict[str, Any], name: str) -> dict[str, 
     criteria = question.get("criteria")
     if not isinstance(criteria, Mapping) or len(criteria) < 1:
         raise JevValidationError(f"choice question {name!r} needs a non-empty criteria object")
+    if len(criteria) > MAX_CHOICE_OPTIONS:
+        raise JevValidationError(f"choice question {name!r} accepts at most {MAX_CHOICE_OPTIONS} alternatives")
     if any(
         not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
         for k, v in criteria.items()
@@ -298,9 +322,14 @@ _MAX_MODEL_CHARS = 128
 _USAGE_KEYS = frozenset({"input_tokens", "output_tokens"})
 
 
-def _validate_probability_map(value: Any) -> None:
-    if not isinstance(value, Mapping) or not value or len(value) > _MAX_ANSWER_METADATA_ITEMS:
+def _validate_probability_map(value: Any, choices: Mapping[str, str] | None = None) -> None:
+    # Choice maps cannot contain more entries than the request's alternatives.
+    # Score maps retain their fixed bound; the response byte cap still applies.
+    limit = len(choices) if choices is not None else _MAX_ANSWER_METADATA_ITEMS
+    if not isinstance(value, Mapping) or not value or len(value) > limit:
         raise JevProtocolError("Jev API response did not contain an answers object")
+    if choices is not None and not set(value).issubset(choices):
+        raise JevProtocolError("Jev API response contained unknown probability alternatives")
     for key, probability in value.items():
         if (
             not isinstance(key, str)
@@ -313,7 +342,9 @@ def _validate_probability_map(value: Any) -> None:
             raise JevProtocolError("Jev API response did not contain an answers object")
 
 
-def _validate_answer_metadata(body: Mapping[str, Any], allowed_keys: set[str]) -> None:
+def _validate_answer_metadata(
+    body: Mapping[str, Any], allowed_keys: set[str], choices: Mapping[str, str] | None = None,
+) -> None:
     if not set(body).issubset(allowed_keys):
         raise JevProtocolError("Jev API response did not contain an answers object")
     if "confidence" in body:
@@ -327,7 +358,7 @@ def _validate_answer_metadata(body: Mapping[str, Any], allowed_keys: set[str]) -
         ):
             raise JevProtocolError("Jev API response did not contain an answers object")
     if "probabilities" in body:
-        _validate_probability_map(body["probabilities"])
+        _validate_probability_map(body["probabilities"], choices)
     if "legend" in body:
         legend = body["legend"]
         if (
@@ -367,7 +398,9 @@ def _validate_answer_body(name: str, body: Any, expected_question: Mapping[str, 
         return {"type": "noul", "noul": value}
 
     if kind == "choice":
-        _validate_answer_metadata(body, {"type", "choice", "confidence", "probabilities"})
+        _validate_answer_metadata(
+            body, {"type", "choice", "confidence", "probabilities"}, expected_question["criteria"],
+        )
         if "choice" not in body:
             raise JevProtocolError("Jev API response did not contain an answers object")
         criteria = expected_question["criteria"]

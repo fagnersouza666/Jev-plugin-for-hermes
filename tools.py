@@ -455,6 +455,11 @@ def make_tool_call_guard(
 ):
     """Return the ``pre_tool_call`` callback used for all Hermes tool calls."""
     plugin_settings = _resolve_settings(settings)
+    if not plugin_settings.pre_tool_guard_enabled:
+        def disabled_guard(**_: Any) -> None:
+            return None
+
+        return disabled_guard
     hook_timeout = max(1.0, min(plugin_settings.timeout_seconds, _HOOK_TIMEOUT_MAX))
     hook_settings = replace(plugin_settings, timeout_seconds=hook_timeout)
     client = JevClient.from_settings(hook_settings)
