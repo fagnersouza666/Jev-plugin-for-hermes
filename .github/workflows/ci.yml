@@ -22,7 +22,7 @@ jobs:
         run: |
           python -m venv .venv
           . .venv/bin/activate
-          pip install --upgrade pip
+          pip install --upgrade pip "setuptools>=83.0.0"
           pip install -e '.[dev]'
 
       - name: Ruff
@@ -51,13 +51,13 @@ jobs:
         run: |
           python -m venv .venv
           . .venv/bin/activate
-          pip install --upgrade pip
-          pip install -e '.[dev]' pip-audit==2.10.1
+          pip install --upgrade pip "setuptools>=83.0.0"
+          pip install -e '.[dev]'
 
       - name: pip-audit (dev extras)
         run: |
           . .venv/bin/activate
-          python -m pip_audit --skip-editable
+          bash scripts/pip-audit.sh
 
       - name: Install gitleaks
         run: |
