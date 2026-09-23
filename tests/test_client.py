@@ -677,3 +677,47 @@ def test_parse_answers_returns_sanitized_allowlisted_payload():
     }
     assert "ok" not in result
     assert "error" not in result
+
+
+def test_parse_answers_accepts_openrouter_usage_cost():
+    """OpenRouter's System One adapter appends a numeric `usage.cost`.
+
+    Regression: the strict usage allow-list used to reject the whole response with
+    "did not contain an answers object" when routed through OpenRouter.
+    """
+
+    def opener(*args, **kwargs):
+        return FakeResponse(
+            {
+                "model": "typesafe/jev-1.13-20260917",
+                "provider": "TypeSafe",
+                "id": "gen-dec-1",
+                "usage": {"input_tokens": 271, "output_tokens": 20, "cost": 0.000011382},
+                "answers": {"q": {"type": "noul", "noul": 0.57}},
+            }
+        )
+
+    client = JevClient(api_key="x", opener=opener)
+    result = client.evaluate(
+        state="hello",
+        questions={"q": {"type": "noul", "instructions": "True?"}},
+    )
+    assert result["answers"] == {"q": {"type": "noul", "noul": 0.57}}
+    assert result["usage"] == {"input_tokens": 271, "output_tokens": 20, "cost": 0.000011382}
+
+
+def test_parse_answers_rejects_invalid_usage_cost():
+    questions = {"q": {"type": "noul", "instructions": "True?"}}
+
+    for bad_cost in (-0.1, float("inf"), True, "free"):
+        def opener(*args, _bad=bad_cost, **kwargs):
+            return FakeResponse(
+                {
+                    "usage": {"cost": _bad},
+                    "answers": {"q": {"type": "noul", "noul": 0.5}},
+                }
+            )
+
+        client = JevClient(api_key="x", opener=opener)
+        with pytest.raises(JevProtocolError):
+            client.evaluate(state="hello", questions=questions)

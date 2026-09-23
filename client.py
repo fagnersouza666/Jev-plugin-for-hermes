@@ -320,6 +320,10 @@ def _reject_json_constant(_value: str) -> None:
 _MAX_ANSWER_METADATA_ITEMS = 64
 _MAX_MODEL_CHARS = 128
 _USAGE_KEYS = frozenset({"input_tokens", "output_tokens"})
+# OpenRouter's System One adapter appends a numeric `cost` to `usage`; TypeSafe's own API
+# omits it. Accept this documented extra rather than failing an otherwise valid response
+# (see https://openrouter.ai/docs/guides/community/typesafe-sdk, "Request and response format").
+_USAGE_NUMBER_KEYS = frozenset({"cost"})
 
 
 def _validate_probability_map(value: Any, choices: Mapping[str, str] | None = None) -> None:
@@ -460,11 +464,15 @@ def _parse_answers(raw: bytes, status: int, expected: Mapping[str, Any]) -> dict
 
     if "usage" in decoded:
         usage = decoded["usage"]
-        if not isinstance(usage, dict) or not set(usage).issubset(_USAGE_KEYS):
+        if not isinstance(usage, dict) or not set(usage).issubset(_USAGE_KEYS | _USAGE_NUMBER_KEYS):
             raise JevProtocolError("Jev API response did not contain an answers object")
-        cleaned_usage: dict[str, int] = {}
+        cleaned_usage: dict[str, float] = {}
         for key, value in usage.items():
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise JevProtocolError("Jev API response did not contain an answers object")
+            if not math.isfinite(value) or value < 0:
+                raise JevProtocolError("Jev API response did not contain an answers object")
+            if key in _USAGE_KEYS and not isinstance(value, int):
                 raise JevProtocolError("Jev API response did not contain an answers object")
             cleaned_usage[key] = value
         result["usage"] = cleaned_usage
